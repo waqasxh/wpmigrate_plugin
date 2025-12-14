@@ -17,21 +17,22 @@ jQuery(document).ready(function ($) {
         var $status = $('#wpmb-backup-status');
         var originalText = $btn.text();
 
+        // Prevent double submission
         $btn.prop('disabled', true).text('Creating Backup...');
-        $status.show().html('<strong>' + wpmbAdmin.strings.backupInProgress + '</strong><br>This may take several minutes depending on your site size.');
+        $status.show().html('<strong>' + wpmbAdmin.strings.backupInProgress + '</strong><br>This may take several minutes depending on your site size.<br><em style="color:#666;">Do not close this page or click the button again.</em>');
         operationInProgress = true;
 
         // Start status checking
         startStatusChecking();
 
-        $.ajax({
+        var ajaxRequest = $.ajax({
             url: wpmbAdmin.ajaxUrl,
             method: 'POST',
             data: {
                 action: 'wpmb_create_backup_ajax',
                 nonce: wpmbAdmin.nonce
             },
-            timeout: 600000, // 10 minutes
+            timeout: 900000, // 15 minutes (increased from 10)
             success: function (response) {
                 stopStatusChecking();
                 operationInProgress = false;
@@ -55,13 +56,32 @@ jQuery(document).ready(function ($) {
             },
             error: function (xhr, status, error) {
                 stopStatusChecking();
-                operationInProgress = false;
-                $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
-                    .html('<strong>✗ Error:</strong> Request failed. ' + error);
-                $btn.prop('disabled', false).text(originalText);
+
+                // Check if backup actually completed despite timeout
+                if (status === 'timeout') {
+                    $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
+                        .html('<strong>⚠️ Request timed out</strong><br>' +
+                            'The backup may still be running in the background. ' +
+                            'Please wait a minute and refresh the page to check if it completed.<br>' +
+                            '<button type="button" class="button button-small" onclick="window.location.reload();" style="margin-top:10px;">Refresh Page Now</button>');
+
+                    // Don't reset operationInProgress immediately - give it time
+                    setTimeout(function () {
+                        operationInProgress = false;
+                    }, 5000);
+                } else {
+                    operationInProgress = false;
+                    $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
+                        .html('<strong>✗ Error:</strong> Request failed. ' + error);
+                    $btn.prop('disabled', false).text(originalText);
+                }
+
                 refreshLogs();
             }
         });
+
+        // Prevent multiple submissions
+        $(this).data('ajax-request', ajaxRequest);
 
         return false;
     });
@@ -94,13 +114,13 @@ jQuery(document).ready(function ($) {
         var $status = $('#wpmb-restore-status');
 
         $btn.prop('disabled', true).text('Restoring...');
-        $status.show().html('<strong>' + wpmbAdmin.strings.restoreInProgress + '</strong><br>Creating safety backup, importing database, replacing URLs, and restoring files...');
+        $status.show().html('<strong>' + wpmbAdmin.strings.restoreInProgress + '</strong><br>Creating safety backup, importing database, replacing URLs, and restoring files...<br><em style="color:#666;">Do not close this page or click the button again.</em>');
         operationInProgress = true;
 
         // Start status checking
         startStatusChecking();
 
-        $.ajax({
+        var ajaxRequest = $.ajax({
             url: wpmbAdmin.ajaxUrl,
             method: 'POST',
             data: {
@@ -109,7 +129,7 @@ jQuery(document).ready(function ($) {
                 archive_id: archiveId,
                 archive_path: archivePath
             },
-            timeout: 600000, // 10 minutes
+            timeout: 900000, // 15 minutes (increased from 10)
             success: function (response) {
                 stopStatusChecking();
                 operationInProgress = false;
@@ -133,10 +153,26 @@ jQuery(document).ready(function ($) {
             },
             error: function (xhr, status, error) {
                 stopStatusChecking();
-                operationInProgress = false;
-                $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
-                    .html('<strong>✗ Error:</strong> Request failed. ' + error);
-                $btn.prop('disabled', false).text(originalText);
+
+                // Check if restore actually completed despite timeout
+                if (status === 'timeout') {
+                    $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
+                        .html('<strong>⚠️ Request timed out</strong><br>' +
+                            'The restore may still be running in the background. ' +
+                            'Please wait a minute and refresh the page to check if it completed.<br>' +
+                            '<button type="button" class="button button-small" onclick="window.location.reload();" style="margin-top:10px;">Refresh Page Now</button>');
+
+                    // Don't reset operationInProgress immediately
+                    setTimeout(function () {
+                        operationInProgress = false;
+                    }, 5000);
+                } else {
+                    operationInProgress = false;
+                    $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
+                        .html('<strong>✗ Error:</strong> Request failed. ' + error);
+                    $btn.prop('disabled', false).text(originalText);
+                }
+
                 refreshLogs();
             }
         });

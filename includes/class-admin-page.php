@@ -117,7 +117,7 @@ class WPMB_Admin_Page
             $restore_locked = WPMB_Lock::is_locked('restore');
             if ($backup_locked || $restore_locked) {
                 $lock_type = $backup_locked ? 'backup' : 'restore';
-                ?>
+            ?>
                 <div class="notice notice-warning">
                     <p>
                         <strong>⚠️ <?php echo esc_html(ucfirst($lock_type)); ?> operation in progress or stale lock detected.</strong><br>
@@ -127,7 +127,7 @@ class WPMB_Admin_Page
                         </button>
                     </p>
                 </div>
-                <?php
+            <?php
             }
             ?>
 
@@ -524,6 +524,10 @@ class WPMB_Admin_Page
             wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
         }
 
+        // Increase execution limits for large sites
+        @set_time_limit(900); // 15 minutes
+        @ini_set('memory_limit', '512M');
+
         $label = self::default_label();
 
         try {
@@ -551,6 +555,10 @@ class WPMB_Admin_Page
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
         }
+
+        // Increase execution limits for large sites
+        @set_time_limit(900); // 15 minutes
+        @ini_set('memory_limit', '512M');
 
         $archive_id = isset($_POST['archive_id']) ? sanitize_text_field(wp_unslash($_POST['archive_id'])) : '';
         $archive_path_field = isset($_POST['archive_path']) ? wp_unslash($_POST['archive_path']) : '';
