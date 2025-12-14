@@ -91,7 +91,7 @@ class WPMB_Log
         return self::$log_dir;
     }
 
-    public static function get_recent_entries($count = 20)
+    public static function get_recent_entries($count = 1000)
     {
         if (!self::init()) {
             return [];
@@ -109,12 +109,11 @@ class WPMB_Log
             $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
             if ($lines) {
                 $entries = array_merge($entries, $lines);
-                if (count($entries) >= $count) {
-                    break;
-                }
             }
         }
 
-        return array_slice(array_reverse($entries), -$count);
+        // Return most recent entries up to $count, newest first
+        $entries = array_reverse($entries);
+        return $count > 0 ? array_slice($entries, 0, $count) : $entries;
     }
 }

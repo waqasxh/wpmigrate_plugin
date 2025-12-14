@@ -11,15 +11,8 @@ class WPMB_Plugin
 
         self::$booted = true;
 
-        WPMB_Log::write('WP Migrate Lite initializing', [
-            'version' => '1.0.0',
-            'php_version' => PHP_VERSION,
-            'wp_version' => get_bloginfo('version'),
-        ]);
-
         try {
             WPMB_Paths::ensure_directories();
-            WPMB_Log::write('Storage directories verified');
         } catch (Exception $e) {
             WPMB_Log::write('Initialization failed - directory creation error', ['error' => $e->getMessage()]);
             add_action('admin_notices', function () use ($e) {
@@ -47,8 +40,6 @@ class WPMB_Plugin
         }
 
         add_action('wpmb_daily_housekeeping', ['WPMB_Backup_Manager', 'housekeeping']);
-
-        WPMB_Log::write('WP Migrate Lite initialized successfully');
     }
 
     public static function activate()

@@ -13,6 +13,8 @@ class WPMB_Admin_Page
 
         // AJAX handlers
         add_action('wp_ajax_wpmb_create_backup_ajax', [self::class, 'ajax_create_backup']);
+        add_action('wp_ajax_wpmb_do_backup_background', [self::class, 'ajax_do_backup_background']);
+        add_action('wp_ajax_wpmb_check_backup_status', [self::class, 'ajax_check_backup_status']);
         add_action('wp_ajax_wpmb_restore_backup_ajax', [self::class, 'ajax_restore_backup']);
         add_action('wp_ajax_wpmb_check_operation_status', [self::class, 'ajax_check_operation_status']);
         add_action('wp_ajax_wpmb_clear_logs', [self::class, 'ajax_clear_logs']);
@@ -84,7 +86,7 @@ class WPMB_Admin_Page
         ]);
 
         $archives = WPMB_Backup_Manager::list_archives();
-        $logs = self::tail_logs(20);
+        $logs = self::tail_logs(1000); // Show up to 1000 lines
 
         $notice = '';
         if (isset($_GET['wpmb_notice'])) {
@@ -496,6 +498,48 @@ class WPMB_Admin_Page
         return sprintf('%s-%s', $host, gmdate('Ymd-His'));
     }
 
+    private static function dispatch_background_backup($label)
+    {
+        $cookies = [];
+
+        if (!empty($_COOKIE)) {
+            foreach ($_COOKIE as $name => $value) {
+                if (is_array($value)) {
+                    continue;
+                }
+
+                $cookies[] = new WP_Http_Cookie([
+                    'name' => $name,
+                    'value' => $value,
+                ]);
+            }
+        }
+
+        $response = wp_remote_post(admin_url('admin-ajax.php'), [
+            'body' => [
+                'action' => 'wpmb_do_backup_background',
+                'nonce' => wp_create_nonce('wpmb_background'),
+                'label' => $label,
+            ],
+            'timeout' => 0.1,
+            'blocking' => false,
+            'sslverify' => apply_filters('https_local_ssl_verify', false),
+            'cookies' => $cookies,
+            'headers' => [
+                'Connection' => 'close',
+            ],
+            'redirection' => 0,
+        ]);
+
+        if (is_wp_error($response)) {
+            WPMB_Log::write('Failed to dispatch background backup', ['error' => $response->get_error_message()]);
+            return false;
+        }
+
+        WPMB_Log::write('Background backup dispatched', ['label' => $label]);
+        return true;
+    }
+
     private static function environment_label($suffix)
     {
         $env = function_exists('wp_get_environment_type') ? wp_get_environment_type() : 'production';
@@ -529,12 +573,38 @@ class WPMB_Admin_Page
             wp_send_json_error(['message' => __('A backup operation is already in progress. Please wait or clear the lock.', 'wpmb')]);
         }
 
+        $label = self::default_label();
+
+        if (!self::dispatch_background_backup($label)) {
+            wp_send_json_error(['message' => __('Failed to dispatch background backup. Check site loopback requests and logs.', 'wpmb')]);
+        }
+
+        wp_send_json_success([
+            'started' => true,
+            'label' => $label,
+        ]);
+    }
+
+    public static function ajax_do_backup_background()
+    {
+        WPMB_Log::write('Background backup handler called', [
+            'post_data' => array_keys($_POST),
+            'has_nonce' => isset($_POST['nonce']),
+        ]);
+
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'wpmb_background')) {
+            WPMB_Log::write('Background backup - nonce verification failed');
+            return;
+        }
+
         // Increase execution limits for large sites
         @set_time_limit(1800); // 30 minutes
         @ini_set('memory_limit', '1024M'); // 1GB for large sites
         @ini_set('max_execution_time', '1800');
+        ignore_user_abort(true);
 
-        $label = self::default_label();
+        $label = sanitize_text_field($_POST['label'] ?? self::default_label());
 
         try {
             $result = WPMB_Backup_Manager::create([
@@ -543,8 +613,7 @@ class WPMB_Admin_Page
                 'include_database' => true,
             ]);
 
-            wp_send_json_success([
-                'message' => __('✓ Backup created successfully!', 'wpmb'),
+            WPMB_Log::write('✓ Background backup completed successfully', [
                 'archive' => $result['id'] ?? basename($result['path']),
                 'size' => size_format($result['filesize'] ?? 0),
             ]);
@@ -552,16 +621,56 @@ class WPMB_Admin_Page
             // Ensure lock is released on error
             WPMB_Lock::force_release('backup');
 
-            WPMB_Log::write('Backup request failed via AJAX', [
+            WPMB_Log::write('✗ Background backup failed', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);
-
-            wp_send_json_error([
-                'message' => $e->getMessage(),
-                'details' => 'Check logs for full error details.',
-            ]);
         }
+
+        exit;
+    }
+
+    public static function ajax_check_backup_status()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        $is_locked = WPMB_Lock::is_locked('backup');
+        $archives = WPMB_Backup_Manager::list_archives();
+        $recent_logs = self::tail_logs(50);
+
+        // Check if backup completed by looking for success message in recent logs
+        $completed = false;
+        $failed = false;
+        $message = '';
+
+        foreach ($recent_logs as $log) {
+            if (strpos($log, '✓ Background backup completed successfully') !== false) {
+                $completed = true;
+                $message = 'Backup completed successfully!';
+                break;
+            } elseif (strpos($log, '✗ Background backup failed') !== false) {
+                $failed = true;
+                // Extract error message from log
+                if (preg_match('/"error":"([^"]+)"/', $log, $matches)) {
+                    $message = $matches[1];
+                } else {
+                    $message = 'Backup failed. Check logs for details.';
+                }
+                break;
+            }
+        }
+
+        wp_send_json_success([
+            'is_locked' => $is_locked,
+            'completed' => $completed,
+            'failed' => $failed,
+            'message' => $message,
+            'archive_count' => count($archives),
+        ]);
     }
 
     public static function ajax_restore_backup()
