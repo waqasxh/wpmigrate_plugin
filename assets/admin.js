@@ -32,7 +32,7 @@ jQuery(document).ready(function ($) {
                 action: 'wpmb_create_backup_ajax',
                 nonce: wpmbAdmin.nonce
             },
-            timeout: 900000, // 15 minutes (increased from 10)
+            timeout: 1800000, // 30 minutes for large sites
             success: function (response) {
                 stopStatusChecking();
                 operationInProgress = false;
@@ -47,7 +47,7 @@ jQuery(document).ready(function ($) {
                     }, 2000);
                 } else {
                     $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
-                        .html('<strong>✗ Error:</strong> ' + response.data.message);
+                        .html('<strong>✗ Error:</strong> ' + response.data.message + '<br>' + (response.data.details || ''));
                     $btn.prop('disabled', false).text(originalText);
                 }
 
@@ -62,17 +62,27 @@ jQuery(document).ready(function ($) {
                     $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
                         .html('<strong>⚠️ Request timed out</strong><br>' +
                             'The backup may still be running in the background. ' +
-                            'Please wait a minute and refresh the page to check if it completed.<br>' +
+                            'Please wait 2-3 minutes and refresh the page to check if it completed.<br>' +
                             '<button type="button" class="button button-small" onclick="window.location.reload();" style="margin-top:10px;">Refresh Page Now</button>');
 
                     // Don't reset operationInProgress immediately - give it time
                     setTimeout(function () {
                         operationInProgress = false;
-                    }, 5000);
+                        $btn.prop('disabled', false).text(originalText);
+                    }, 10000); // 10 seconds
                 } else {
                     operationInProgress = false;
+
+                    // Try to get detailed error message
+                    var errorMsg = 'Request failed.';
+                    if (xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message) {
+                        errorMsg = xhr.responseJSON.data.message;
+                    } else if (xhr.responseText) {
+                        errorMsg = 'Server error. Check logs for details.';
+                    }
+
                     $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
-                        .html('<strong>✗ Error:</strong> Request failed. ' + error);
+                        .html('<strong>✗ Error:</strong> ' + errorMsg + '<br>Status: ' + status + '<br>Check the logs below for more details.');
                     $btn.prop('disabled', false).text(originalText);
                 }
 
@@ -129,7 +139,7 @@ jQuery(document).ready(function ($) {
                 archive_id: archiveId,
                 archive_path: archivePath
             },
-            timeout: 900000, // 15 minutes (increased from 10)
+            timeout: 1800000, // 30 minutes for large sites
             success: function (response) {
                 stopStatusChecking();
                 operationInProgress = false;
@@ -159,15 +169,31 @@ jQuery(document).ready(function ($) {
                     $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
                         .html('<strong>⚠️ Request timed out</strong><br>' +
                             'The restore may still be running in the background. ' +
-                            'Please wait a minute and refresh the page to check if it completed.<br>' +
+                            'Please wait 2-3 minutes and refresh the page to check if it completed.<br>' +
                             '<button type="button" class="button button-small" onclick="window.location.reload();" style="margin-top:10px;">Refresh Page Now</button>');
 
                     // Don't reset operationInProgress immediately
                     setTimeout(function () {
                         operationInProgress = false;
-                    }, 5000);
+                        $btn.prop('disabled', false).text(originalText);
+                    }, 10000); // 10 seconds
                 } else {
                     operationInProgress = false;
+                    
+                    // Try to get detailed error message
+                    var errorMsg = 'Request failed.';
+                    if (xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message) {
+                        errorMsg = xhr.responseJSON.data.message;
+                    } else if (xhr.responseText) {
+                        errorMsg = 'Server error. Check logs for details.';
+                    }
+                    
+                    $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
+                        .html('<strong>✗ Error:</strong> ' + errorMsg + '<br>Status: ' + status + '<br>Check the logs below for more details.');
+                    $btn.prop('disabled', false).text(originalText);
+                }
+
+                refreshLogs();
                     $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
                         .html('<strong>✗ Error:</strong> Request failed. ' + error);
                     $btn.prop('disabled', false).text(originalText);

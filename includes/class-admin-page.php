@@ -524,9 +524,15 @@ class WPMB_Admin_Page
             wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
         }
 
+        // Check if already locked
+        if (WPMB_Lock::is_locked('backup')) {
+            wp_send_json_error(['message' => __('A backup operation is already in progress. Please wait or clear the lock.', 'wpmb')]);
+        }
+
         // Increase execution limits for large sites
-        @set_time_limit(900); // 15 minutes
-        @ini_set('memory_limit', '512M');
+        @set_time_limit(1800); // 30 minutes
+        @ini_set('memory_limit', '1024M'); // 1GB for large sites
+        @ini_set('max_execution_time', '1800');
 
         $label = self::default_label();
 
@@ -543,8 +549,18 @@ class WPMB_Admin_Page
                 'size' => size_format($result['filesize'] ?? 0),
             ]);
         } catch (Throwable $e) {
-            WPMB_Log::write('Backup request failed via AJAX', ['error' => $e->getMessage()]);
-            wp_send_json_error(['message' => $e->getMessage()]);
+            // Ensure lock is released on error
+            WPMB_Lock::force_release('backup');
+
+            WPMB_Log::write('Backup request failed via AJAX', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            wp_send_json_error([
+                'message' => $e->getMessage(),
+                'details' => 'Check logs for full error details.',
+            ]);
         }
     }
 
@@ -556,9 +572,15 @@ class WPMB_Admin_Page
             wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
         }
 
+        // Check if already locked
+        if (WPMB_Lock::is_locked('restore')) {
+            wp_send_json_error(['message' => __('A restore operation is already in progress. Please wait or clear the lock.', 'wpmb')]);
+        }
+
         // Increase execution limits for large sites
-        @set_time_limit(900); // 15 minutes
-        @ini_set('memory_limit', '512M');
+        @set_time_limit(1800); // 30 minutes
+        @ini_set('memory_limit', '1024M'); // 1GB for large sites
+        @ini_set('max_execution_time', '1800');
 
         $archive_id = isset($_POST['archive_id']) ? sanitize_text_field(wp_unslash($_POST['archive_id'])) : '';
         $archive_path_field = isset($_POST['archive_path']) ? wp_unslash($_POST['archive_path']) : '';
@@ -589,9 +611,13 @@ class WPMB_Admin_Page
                 'message' => __('✓ Restore completed successfully! Your site has been updated with the backup data.', 'wpmb'),
             ]);
         } catch (Throwable $e) {
+            // Ensure lock is released on error
+            WPMB_Lock::force_release('restore');
+
             WPMB_Log::write('Restore operation failed via AJAX', [
                 'user' => wp_get_current_user()->user_login,
                 'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
             ]);
 
             $errorMsg = $e->getMessage();
