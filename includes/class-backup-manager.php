@@ -14,10 +14,12 @@ class WPMB_Backup_Manager
         ]);
 
         if (!$options['include_files'] && !$options['include_database']) {
+            WPMB_Log::write('Backup failed - no content selected', ['include_files' => false, 'include_database' => false]);
             throw new InvalidArgumentException('Nothing to backup. Enable files and/or database.');
         }
 
         if (!class_exists('ZipArchive')) {
+            WPMB_Log::write('Backup failed - ZipArchive extension missing');
             throw new RuntimeException('ZipArchive is required but missing. Enable the PHP zip extension.');
         }
 
@@ -29,6 +31,7 @@ class WPMB_Backup_Manager
             $zip = new ZipArchive();
 
             if ($zip->open($archivePath, ZipArchive::CREATE) !== true) {
+                WPMB_Log::write('Backup failed - cannot initialize archive', ['path' => $archivePath]);
                 throw new RuntimeException('Unable to initialize backup archive.');
             }
 
@@ -39,25 +42,37 @@ class WPMB_Backup_Manager
             WPMB_Log::write('Backup started', [
                 'label' => $manifest['label'],
                 'archive' => basename($archivePath),
+                'include_database' => (bool) $options['include_database'],
+                'include_files' => (bool) $options['include_files'],
+                'environment' => $manifest['environment'],
             ]);
 
             if ($options['include_database']) {
+                WPMB_Log::write('Starting database dump');
                 $dbFile = WPMB_Paths::temp_file('wpmb_db');
                 $dumper = new WPMB_Database_Dump();
                 $tables = $dumper->generate($dbFile);
                 $zip->addFile($dbFile, 'database.sql');
                 $tempFiles[] = $dbFile;
                 $manifest['tables'] = $tables;
+                WPMB_Log::write('Database dumped', [
+                    'num_tables' => count($tables),
+                    'sql_filesize' => size_format(filesize($dbFile)),
+                ]);
             }
 
             if ($options['include_files']) {
+                WPMB_Log::write('Starting file archiving', ['source_dir' => WP_CONTENT_DIR]);
                 $archiver = new WPMB_File_Archiver($zip);
                 $archiver->add_directory(WP_CONTENT_DIR, 'wp-content');
+                WPMB_Log::write('Files archived successfully');
             }
 
             $zip->addFromString('manifest.json', wp_json_encode($manifest, JSON_PRETTY_PRINT));
 
+            WPMB_Log::write('Closing archive file');
             if (!$zip->close()) {
+                WPMB_Log::write('Backup failed - cannot finalize archive');
                 throw new RuntimeException('Failed to finalize backup archive.');
             }
 
@@ -82,12 +97,15 @@ class WPMB_Backup_Manager
                 'download_url' => $downloadUrl,
             ]);
 
-            WPMB_Log::write('Backup completed', [
+            WPMB_Log::write('Backup completed successfully', [
                 'archive' => basename($archivePath),
-                'size' => $size,
+                'size' => size_format($size),
                 'checksum' => $checksum,
+                'num_tables' => count($tables),
+                'download_token_expires' => gmdate('Y-m-d H:i:s', time() + DAY_IN_SECONDS) . ' UTC',
             ]);
 
+            WPMB_Log::write('Enforcing retention policy', ['retention_limit' => (int) $options['retention']]);
             self::enforce_retention((int) $options['retention']);
 
             return $summary;
@@ -166,9 +184,18 @@ class WPMB_Backup_Manager
 
     public static function housekeeping()
     {
+        WPMB_Log::write('Starting daily housekeeping');
+
+        WPMB_Log::write('Purging expired download tokens');
         WPMB_Token::purge_expired();
+
+        WPMB_Log::write('Enforcing retention policy');
         self::enforce_retention(self::DEFAULT_RETENTION);
+
+        WPMB_Log::write('Cleaning up temporary files');
         WPMB_Paths::cleanup_temp();
+
+        WPMB_Log::write('Daily housekeeping completed');
     }
 
     public static function ingest($filePath, $label = 'imported')
@@ -233,10 +260,20 @@ class WPMB_Backup_Manager
 
         $archives = self::list_archives();
         if (count($archives) <= $limit) {
+            WPMB_Log::write('Retention check - no pruning needed', [
+                'current_count' => count($archives),
+                'limit' => $limit,
+            ]);
             return;
         }
 
         $toRemove = array_slice($archives, $limit);
+        WPMB_Log::write('Enforcing retention policy', [
+            'total_archives' => count($archives),
+            'retention_limit' => $limit,
+            'archives_to_remove' => count($toRemove),
+        ]);
+
         foreach ($toRemove as $record) {
             if (isset($record['path'])) {
                 self::delete_by_path($record['path'], ['message' => 'Backup pruned by retention policy']);

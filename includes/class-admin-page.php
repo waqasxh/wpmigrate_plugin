@@ -31,8 +31,14 @@ class WPMB_Admin_Page
             return;
         }
 
+        // Write a page view log entry to ensure logging is working
+        WPMB_Log::write('Admin page viewed', [
+            'user' => wp_get_current_user()->user_login,
+            'time' => gmdate('Y-m-d H:i:s'),
+        ]);
+
         $archives = WPMB_Backup_Manager::list_archives();
-        $logs = self::tail_logs();
+        $logs = self::tail_logs(20);
 
         $notice = '';
         if (isset($_GET['wpmb_notice'])) {
@@ -48,6 +54,18 @@ class WPMB_Admin_Page
                     <p><?php echo esc_html($notice); ?></p>
                 </div>
             <?php endif; ?>
+
+            <?php
+            // Handle test log request
+            if (isset($_GET['test_log']) && check_admin_referer('test_log', '_wpnonce')) {
+                WPMB_Log::write('Test log entry - manual trigger', [
+                    'timestamp' => time(),
+                    'user' => wp_get_current_user()->user_login,
+                    'test_data' => 'This is a test to verify logging is working',
+                ]);
+                echo '<div class="notice notice-success"><p><strong>Test log written!</strong> Check the logs below. If nothing appears, check PHP error log for details.</p></div>';
+            }
+            ?>
 
             <div class="wpmb-panels">
                 <div class="wpmb-panel">
@@ -128,10 +146,47 @@ class WPMB_Admin_Page
             <?php endif; ?>
 
             <h2><?php esc_html_e('Recent Logs', 'wpmb'); ?></h2>
+            <?php
+            $log_dir = WPMB_Log::get_log_dir();
+            $log_file = $log_dir . '/wpmb-' . gmdate('Y-m-d') . '.log';
+            ?>
+            <p style="color:#666;font-size:12px;">
+                Log directory: <code><?php echo esc_html($log_dir); ?></code><br>
+                Today's log: <code><?php echo esc_html(basename($log_file)); ?></code>
+                <?php if (file_exists($log_file)): ?>
+                    (<?php echo esc_html(size_format(filesize($log_file))); ?>)
+                <?php else: ?>
+                    <span style="color:orange;">(not created yet)</span>
+                <?php endif; ?>
+            </p>
             <?php if (!$logs) : ?>
-                <p><?php esc_html_e('No log entries available yet.', 'wpmb'); ?></p>
+                <div class="notice notice-warning inline">
+                    <p><strong><?php esc_html_e('No log entries found.', 'wpmb'); ?></strong></p>
+                    <p><?php esc_html_e('Logs will appear here after you create a backup or restore. If logs never appear, check:', 'wpmb'); ?></p>
+                    <ul style="list-style:disc;margin-left:2em;">
+                        <li>Write permissions on: <code><?php echo esc_html($log_dir); ?></code></li>
+                        <li>PHP error log for "[WP Migrate Lite]" messages</li>
+                        <li>Temp fallback logs in: <code><?php echo esc_html(sys_get_temp_dir()); ?></code></li>
+                    </ul>
+                    <p>
+                        <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin.php?page=' . self::SLUG . '&test_log=1'), 'test_log')); ?>" class="button">
+                            <?php esc_html_e('Test Logging', 'wpmb'); ?>
+                        </a>
+                    </p>
+                </div>
             <?php else : ?>
-                <pre style="background:#1e1e1e;color:#dcdcdc;padding:1em;max-height:200px;overflow:auto;"><?php echo esc_html(implode("\n", $logs)); ?></pre>
+                <pre style="background:#1e1e1e;color:#dcdcdc;padding:1em;max-height:300px;overflow:auto;border:1px solid #ccc;"><?php echo esc_html(implode("\n", $logs)); ?></pre>
+                <p style="margin-top:0.5em;">
+                    <a href="<?php echo esc_url(admin_url('admin.php?page=' . self::SLUG . '&refresh_logs=1')); ?>" class="button button-small">
+                        <?php esc_html_e('Refresh Logs', 'wpmb'); ?>
+                    </a>
+                    <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin.php?page=' . self::SLUG . '&test_log=1'), 'test_log')); ?>" class="button button-small">
+                        <?php esc_html_e('Test Logging', 'wpmb'); ?>
+                    </a>
+                    <span style="color:#666;margin-left:1em;font-size:12px;">
+                        Showing last <?php echo count($logs); ?> entries
+                    </span>
+                </p>
             <?php endif; ?>
         </div>
 <?php
@@ -172,6 +227,12 @@ class WPMB_Admin_Page
             self::redirect_with_notice(__('Backup archive not found. Refresh this page and try again.', 'wpmb'), 'error');
         }
 
+        WPMB_Log::write('Restore operation initiated by user', [
+            'user' => wp_get_current_user()->user_login,
+            'archive' => basename($archive_path),
+            'archive_size' => size_format(filesize($archive_path)),
+        ]);
+
         try {
             WPMB_Restore_Manager::restore([
                 'archive_id' => $archive_id,
@@ -179,10 +240,42 @@ class WPMB_Admin_Page
                 'drop_tables' => true,
                 'safety_backup' => true,
             ]);
-            self::redirect_with_notice(__('Restore completed.', 'wpmb'));
+
+            WPMB_Log::write('Restore operation completed successfully by user', [
+                'user' => wp_get_current_user()->user_login,
+                'archive' => basename($archive_path),
+            ]);
+
+            self::redirect_with_notice(
+                __('✓ Restore completed successfully! Your site has been updated with the backup data.', 'wpmb')
+            );
         } catch (Throwable $e) {
-            WPMB_Log::write('Restore request failed', ['error' => $e->getMessage()]);
-            self::redirect_with_notice($e->getMessage(), 'error');
+            WPMB_Log::write('Restore operation failed', [
+                'user' => wp_get_current_user()->user_login,
+                'error' => $e->getMessage(),
+                'archive' => basename($archive_path),
+            ]);
+
+            // Check if this was a rollback error (contains specific text)
+            $errorMsg = $e->getMessage();
+            $isRolledBack = strpos($errorMsg, 'restored to its previous') !== false;
+            $isCritical = strpos($errorMsg, 'CRITICAL ERROR') !== false;
+
+            if ($isCritical) {
+                // Critical error - both restore and rollback failed
+                $userMessage = '⚠️ CRITICAL: ' . $errorMsg . ' Please check the logs for details and contact support if needed.';
+                $noticeType = 'error';
+            } elseif ($isRolledBack) {
+                // Restore failed but rollback succeeded
+                $userMessage = '⚠️ ' . $errorMsg . ' Your site is still working normally.';
+                $noticeType = 'error';
+            } else {
+                // Regular restore failure
+                $userMessage = '⚠️ Restore failed: ' . $errorMsg . ' Please check the logs for details.';
+                $noticeType = 'error';
+            }
+
+            self::redirect_with_notice($userMessage, $noticeType);
         }
     }
 
@@ -190,23 +283,39 @@ class WPMB_Admin_Page
     {
         self::guard('wpmb_upload_backup');
 
+        WPMB_Log::write('Backup upload initiated', ['user' => wp_get_current_user()->user_login]);
+
         if (empty($_FILES['archive']['tmp_name'])) {
+            WPMB_Log::write('Upload failed - no file received');
             self::redirect_with_notice(__('No file uploaded.', 'wpmb'), 'error');
         }
 
         $file = $_FILES['archive'];
         $tmp = $file['tmp_name'];
+
+        WPMB_Log::write('Processing uploaded file', [
+            'original_name' => $file['name'],
+            'size' => size_format($file['size']),
+            'type' => $file['type'],
+        ]);
+
         if (!is_uploaded_file($tmp)) {
+            WPMB_Log::write('Upload failed - integrity check failed');
             self::redirect_with_notice(__('Upload failed integrity check.', 'wpmb'), 'error');
         }
 
         $destination = WPMB_Paths::temp_file('wpmb_upload');
         if (!move_uploaded_file($tmp, $destination)) {
+            WPMB_Log::write('Upload failed - cannot move file', ['destination' => $destination]);
             self::redirect_with_notice(__('Unable to move uploaded file.', 'wpmb'), 'error');
         }
 
         try {
             $manifest = WPMB_Backup_Manager::ingest($destination, self::environment_label('imported'));
+            WPMB_Log::write('Backup uploaded successfully', [
+                'archive_id' => $manifest['id'] ?? 'unknown',
+                'filesize' => size_format($manifest['filesize'] ?? 0),
+            ]);
             self::redirect_with_notice(sprintf(
                 /* translators: %s Archive ID */
                 __('Backup %s uploaded.', 'wpmb'),
@@ -233,13 +342,21 @@ class WPMB_Admin_Page
         }
 
         if (!$archive_path) {
+            WPMB_Log::write('Delete failed - archive not found', ['archive_id' => $archive_id]);
             self::redirect_with_notice(__('Backup archive could not be located. It may have already been removed.', 'wpmb'), 'error');
         }
+
+        WPMB_Log::write('Deleting backup', [
+            'archive_id' => $archive_id,
+            'archive' => basename($archive_path),
+            'user' => wp_get_current_user()->user_login,
+        ]);
 
         if (WPMB_Backup_Manager::delete_by_path($archive_path)) {
             self::redirect_with_notice(__('Backup deleted.', 'wpmb'));
         }
 
+        WPMB_Log::write('Delete failed - unable to remove file', ['archive' => basename($archive_path)]);
         self::redirect_with_notice(__('Unable to delete backup file.', 'wpmb'), 'error');
     }
 
@@ -265,20 +382,32 @@ class WPMB_Admin_Page
 
     private static function tail_logs($lines = 10)
     {
-        $log_dir = WPMB_Paths::logs_dir();
-        $files = glob($log_dir . '/*.log');
-        if (!$files) {
-            return [];
+        // Use the improved log retrieval method
+        $entries = WPMB_Log::get_recent_entries($lines);
+
+        // Fallback to old method if new one fails
+        if (empty($entries)) {
+            try {
+                $log_dir = WPMB_Paths::logs_dir();
+                $files = glob($log_dir . '/*.log');
+                if (!$files) {
+                    return ['[No log files found. Check directory: ' . $log_dir . ']'];
+                }
+
+                rsort($files);
+                $latest = $files[0];
+                $content = @file($latest, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                if (!$content) {
+                    return ['[Log file exists but could not be read: ' . basename($latest) . ']'];
+                }
+
+                return array_slice($content, -absint($lines));
+            } catch (Throwable $e) {
+                return ['[Error reading logs: ' . $e->getMessage() . ']'];
+            }
         }
 
-        rsort($files);
-        $latest = $files[0];
-        $content = file($latest, FILE_IGNORE_NEW_LINES);
-        if (!$content) {
-            return [];
-        }
-
-        return array_slice($content, -absint($lines));
+        return $entries;
     }
 
     private static function origin_from_manifest(array $manifest)
