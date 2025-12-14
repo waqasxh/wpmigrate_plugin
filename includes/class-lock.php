@@ -30,4 +30,14 @@ class WPMB_Lock
         $lockKey = 'wpmb_lock_' . sanitize_key($key);
         return (bool) get_transient($lockKey);
     }
+
+    public static function force_release($key)
+    {
+        $lockKey = 'wpmb_lock_' . sanitize_key($key);
+        delete_transient($lockKey);
+        WPMB_Log::write('Lock force-released', [
+            'operation' => $key,
+            'lock_key' => $lockKey,
+        ]);
+    }
 }

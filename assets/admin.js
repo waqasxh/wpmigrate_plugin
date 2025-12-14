@@ -186,6 +186,43 @@ jQuery(document).ready(function ($) {
         });
     });
 
+    // Clear lock button
+    $('#wpmb-clear-lock').on('click', function (e) {
+        e.preventDefault();
+
+        if (!confirm('Clear all operation locks? Only do this if no backup or restore is actually running.')) {
+            return;
+        }
+
+        var $btn = $(this);
+        var originalText = $btn.text();
+
+        $btn.prop('disabled', true).text('Clearing...');
+
+        $.ajax({
+            url: wpmbAdmin.ajaxUrl,
+            method: 'POST',
+            data: {
+                action: 'wpmb_clear_lock',
+                nonce: wpmbAdmin.nonce
+            },
+            success: function (response) {
+                if (response.success) {
+                    alert(response.data.message);
+                    // Reload page to remove the warning
+                    window.location.reload();
+                } else {
+                    alert('Error: ' + response.data.message);
+                    $btn.prop('disabled', false).text(originalText);
+                }
+            },
+            error: function () {
+                alert('Failed to clear lock.');
+                $btn.prop('disabled', false).text(originalText);
+            }
+        });
+    });
+
     // Function to refresh logs
     function refreshLogs() {
         $.ajax({

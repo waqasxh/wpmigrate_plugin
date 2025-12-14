@@ -17,6 +17,7 @@ class WPMB_Admin_Page
         add_action('wp_ajax_wpmb_check_operation_status', [self::class, 'ajax_check_operation_status']);
         add_action('wp_ajax_wpmb_clear_logs', [self::class, 'ajax_clear_logs']);
         add_action('wp_ajax_wpmb_get_logs', [self::class, 'ajax_get_logs']);
+        add_action('wp_ajax_wpmb_clear_lock', [self::class, 'ajax_clear_lock']);
 
         add_action('admin_enqueue_scripts', [self::class, 'enqueue_scripts']);
     }
@@ -109,6 +110,24 @@ class WPMB_Admin_Page
                     'test_data' => 'This is a test to verify logging is working',
                 ]);
                 echo '<div class="notice notice-success"><p><strong>Test log written!</strong> Check the logs below. If nothing appears, check PHP error log for details.</p></div>';
+            }
+
+            // Check for active locks
+            $backup_locked = WPMB_Lock::is_locked('backup');
+            $restore_locked = WPMB_Lock::is_locked('restore');
+            if ($backup_locked || $restore_locked) {
+                $lock_type = $backup_locked ? 'backup' : 'restore';
+                ?>
+                <div class="notice notice-warning">
+                    <p>
+                        <strong>⚠️ <?php echo esc_html(ucfirst($lock_type)); ?> operation in progress or stale lock detected.</strong><br>
+                        If no operation is running, this may be a stale lock from a previous operation that didn't complete.
+                        <button type="button" class="button button-small" id="wpmb-clear-lock" style="margin-left:10px;">
+                            Clear Lock
+                        </button>
+                    </p>
+                </div>
+                <?php
             }
             ?>
 
@@ -644,6 +663,27 @@ class WPMB_Admin_Page
         wp_send_json_success([
             'backup_in_progress' => $backup_lock,
             'restore_in_progress' => $restore_lock,
+        ]);
+    }
+
+    public static function ajax_clear_lock()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        // Clear both backup and restore locks
+        WPMB_Lock::force_release('backup');
+        WPMB_Lock::force_release('restore');
+
+        WPMB_Log::write('Locks manually cleared by user', [
+            'user' => wp_get_current_user()->user_login,
+        ]);
+
+        wp_send_json_success([
+            'message' => __('All locks cleared successfully. You can now run operations.', 'wpmb'),
         ]);
     }
 }
