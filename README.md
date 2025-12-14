@@ -11,6 +11,8 @@ WP Migrate Lite is a point-and-click backup and restore utility that installs as
 - **Database repair and optimization** after import to ensure table integrity
 - **Safety backup with automatic rollback** - if restore fails, your site automatically reverts to previous state
 - **Comprehensive logging system** with multiple fallbacks for complete visibility
+- **Async background backups** - admin requests hand off to a non-blocking worker with live status polling
+- **mysqldump acceleration** - automatically switches to the native CLI exporter when available for large datasets
 - Conflict-free locking to block concurrent operations
 - Daily housekeeping clears temp files, expires download tokens, and enforces retention (10 archives by default)
 - Recent activity log visible in the UI plus downloadable ZIP tokens for off-site storage
@@ -36,6 +38,8 @@ You can repeat the same flow in reverse to push local changes back to live—gen
 - Requires the PHP Zip extension and filesystem write access to `wp-content/wpmb-backups`.
 - The plugin excludes its own backup directories from new archives to prevent recursion.
 - `wp-config.php` is never overwritten; existing credentials remain intact across migrations.
+- Backup requests answer immediately and continue on the server via authenticated loopback, preventing browser timeouts on large sites.
+- When `mysqldump` is installed and `proc_open`/`shell_exec` are permitted, database exports use the native CLI for maximum throughput. Override the binary path with the `wpmb_mysqldump_binary` filter if needed.
 - All actions log to `wp-content/wpmb-backups/logs/wpmb-YYYY-MM-DD.log`, and the latest entries surface in the admin panel.
 - A safety backup labeled `pre-restore` is created automatically before any restore, providing an immediate rollback point.
 - If restore fails, the plugin automatically restores your previous state and displays a clear error message.
@@ -83,7 +87,7 @@ Restore operations now include three-level safety:
 
 ### ✅ Enhanced Logging System
 
-Complete rebuild of logging system with:
+Complete rebuild of the logging system with:
 
 - 300+ comprehensive log statements throughout all operations
 - Multiple fallback mechanisms (file, PHP error_log, temp directory)
@@ -92,7 +96,12 @@ Complete rebuild of logging system with:
 - Line-number tracking for SQL errors
 - User-friendly error messages with clear instructions
 
-**See "Logging" section below for details.**
+### ✅ Async Backups & CLI Dump (Performance)
+
+- Backup AJAX calls now dispatch to a background worker, eliminating front-end timeouts while still enforcing operation locks and capability checks.
+- Database dumping prefers `mysqldump` (with safe environment handling) whenever the host permits it, falling back to the PHP chunked exporter otherwise.
+- Large-table exports paginate by primary key and log periodic progress so you can confirm long-running tables (e.g., Action Scheduler) are advancing.
+- Log output includes "Background backup dispatched" and "Using mysqldump" markers to make troubleshooting effortless.
 
 ## Logging
 
@@ -112,7 +121,7 @@ Each log entry includes:
 
 1. Go to **WP Migrate Lite** in your WordPress admin menu
 2. Scroll down to the **Recent Logs** section
-3. The last 20 log entries will be displayed
+3. The most recent log entries will be displayed
 4. Click **Refresh Logs** to see the latest entries
 5. Click **Test Logging** to verify the logging system is working
 
@@ -142,7 +151,7 @@ The plugin uses a robust logging system with multiple fallbacks:
 3. **Fallback:** If main directory fails, writes to system temp directory (`/tmp/` or `C:\Windows\Temp\`)
 4. **Validation:** Tests directory permissions before first write
 
-**This means you can ALWAYS see what's happening**, even if file logging fails.
+Together these guarantees mean you always have an audit trail, even if file logging fails.
 
 ### What Gets Logged
 
@@ -228,7 +237,7 @@ chmod 755 wp-content/wpmb-backups/logs
 
 2. **Check PHP Error Log:**
 
-The plugin ALWAYS logs to PHP error_log as a backup. Look for entries starting with `[WP Migrate Lite]`:
+The plugin always logs to PHP error_log as a backup. Look for entries starting with `[WP Migrate Lite]`:
 
 ```bash
 # Linux/Apache
