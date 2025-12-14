@@ -10,6 +10,15 @@ class WPMB_Admin_Page
         add_action('admin_post_wpmb_restore_backup', [self::class, 'handle_restore_backup']);
         add_action('admin_post_wpmb_upload_backup', [self::class, 'handle_upload_backup']);
         add_action('admin_post_wpmb_delete_backup', [self::class, 'handle_delete_backup']);
+
+        // AJAX handlers
+        add_action('wp_ajax_wpmb_create_backup_ajax', [self::class, 'ajax_create_backup']);
+        add_action('wp_ajax_wpmb_restore_backup_ajax', [self::class, 'ajax_restore_backup']);
+        add_action('wp_ajax_wpmb_check_operation_status', [self::class, 'ajax_check_operation_status']);
+        add_action('wp_ajax_wpmb_clear_logs', [self::class, 'ajax_clear_logs']);
+        add_action('wp_ajax_wpmb_get_logs', [self::class, 'ajax_get_logs']);
+
+        add_action('admin_enqueue_scripts', [self::class, 'enqueue_scripts']);
     }
 
     public static function register()
@@ -22,6 +31,42 @@ class WPMB_Admin_Page
             [self::class, 'render'],
             'dashicons-migrate',
             58
+        );
+    }
+
+    public static function enqueue_scripts($hook)
+    {
+        if (strpos($hook, self::SLUG) === false) {
+            return;
+        }
+
+        wp_enqueue_script(
+            'wpmb-admin',
+            plugins_url('assets/admin.js', dirname(__FILE__)),
+            ['jquery'],
+            '1.0.1',
+            true
+        );
+
+        wp_localize_script('wpmb-admin', 'wpmbAdmin', [
+            'ajaxUrl' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('wpmb_ajax'),
+            'strings' => [
+                'backupInProgress' => __('Creating backup... This may take several minutes. Please do not close this page.', 'wpmb'),
+                'restoreInProgress' => __('Restoring backup... This may take several minutes. Please do not close this page.', 'wpmb'),
+                'confirmRestore' => __('Restore this backup? Current site files and database will be replaced.', 'wpmb'),
+                'confirmDelete' => __('Delete this backup file? This cannot be undone.', 'wpmb'),
+                'confirmClearLogs' => __('Clear all log files? This cannot be undone.', 'wpmb'),
+                'operationComplete' => __('Operation completed!', 'wpmb'),
+                'operationFailed' => __('Operation failed. Check logs for details.', 'wpmb'),
+            ],
+        ]);
+
+        wp_enqueue_style(
+            'wpmb-admin',
+            plugins_url('assets/admin.css', dirname(__FILE__)),
+            [],
+            '1.0.0'
         );
     }
 
@@ -70,11 +115,12 @@ class WPMB_Admin_Page
             <div class="wpmb-panels">
                 <div class="wpmb-panel">
                     <h2><?php esc_html_e('Create Backup', 'wpmb'); ?></h2>
-                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                    <form id="wpmb-backup-form" method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                         <?php wp_nonce_field('wpmb_create_backup'); ?>
                         <input type="hidden" name="action" value="wpmb_create_backup" />
                         <p><?php esc_html_e('Creates a full site archive (database + wp-content). Labels are auto-generated from the site domain and timestamp.', 'wpmb'); ?></p>
-                        <p><button type="submit" class="button button-primary"><?php esc_html_e('Run Backup', 'wpmb'); ?></button></p>
+                        <div id="wpmb-backup-status" style="display:none;margin:10px 0;padding:10px;background:#fff8e5;border-left:4px solid #ffb900;"></div>
+                        <p><button type="submit" class="button button-primary" id="wpmb-backup-btn"><?php esc_html_e('Run Backup', 'wpmb'); ?></button></p>
                     </form>
                 </div>
 
@@ -122,12 +168,12 @@ class WPMB_Admin_Page
                                 <td><?php echo esc_html(size_format($archive['filesize'] ?? 0)); ?></td>
                                 <td>
                                     <a class="button" href="<?php echo esc_url($download_url); ?>"><?php esc_html_e('Download', 'wpmb'); ?></a>
-                                    <form style="display:inline" method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                                    <form style="display:inline" class="wpmb-restore-form" method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                                         <?php wp_nonce_field('wpmb_restore_backup'); ?>
                                         <input type="hidden" name="action" value="wpmb_restore_backup" />
                                         <input type="hidden" name="archive_id" value="<?php echo esc_attr($archive['id']); ?>" />
                                         <input type="hidden" name="archive_path" value="<?php echo esc_attr($archive['path']); ?>" />
-                                        <button type="submit" class="button button-secondary" onclick="return confirm('<?php echo esc_js(__('Restore this backup? Current site files and database will be replaced.', 'wpmb')); ?>');">
+                                        <button type="submit" class="button button-secondary wpmb-restore-btn">
                                             <?php esc_html_e('Restore', 'wpmb'); ?>
                                         </button>
                                     </form>
@@ -175,11 +221,14 @@ class WPMB_Admin_Page
                     </p>
                 </div>
             <?php else : ?>
-                <pre style="background:#1e1e1e;color:#dcdcdc;padding:1em;max-height:300px;overflow:auto;border:1px solid #ccc;"><?php echo esc_html(implode("\n", $logs)); ?></pre>
+                <pre id="wpmb-logs" style="background:#1e1e1e;color:#dcdcdc;padding:1em;max-height:300px;overflow:auto;border:1px solid #ccc;"><?php echo esc_html(implode("\n", $logs)); ?></pre>
                 <p style="margin-top:0.5em;">
-                    <a href="<?php echo esc_url(admin_url('admin.php?page=' . self::SLUG . '&refresh_logs=1')); ?>" class="button button-small">
+                    <button type="button" class="button button-small" id="wpmb-refresh-logs">
                         <?php esc_html_e('Refresh Logs', 'wpmb'); ?>
-                    </a>
+                    </button>
+                    <button type="button" class="button button-small" id="wpmb-clear-logs">
+                        <?php esc_html_e('Clear All Logs', 'wpmb'); ?>
+                    </button>
                     <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin.php?page=' . self::SLUG . '&test_log=1'), 'test_log')); ?>" class="button button-small">
                         <?php esc_html_e('Test Logging', 'wpmb'); ?>
                     </a>
@@ -444,5 +493,157 @@ class WPMB_Admin_Page
         }
 
         return $prefix . '-' . sanitize_title($suffix);
+    }
+
+    // AJAX Handlers
+
+    public static function ajax_create_backup()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        $label = self::default_label();
+
+        try {
+            $result = WPMB_Backup_Manager::create([
+                'label' => $label,
+                'include_files' => true,
+                'include_database' => true,
+            ]);
+
+            wp_send_json_success([
+                'message' => __('✓ Backup created successfully!', 'wpmb'),
+                'archive' => $result['id'] ?? basename($result['path']),
+                'size' => size_format($result['filesize'] ?? 0),
+            ]);
+        } catch (Throwable $e) {
+            WPMB_Log::write('Backup request failed via AJAX', ['error' => $e->getMessage()]);
+            wp_send_json_error(['message' => $e->getMessage()]);
+        }
+    }
+
+    public static function ajax_restore_backup()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        $archive_id = isset($_POST['archive_id']) ? sanitize_text_field(wp_unslash($_POST['archive_id'])) : '';
+        $archive_path_field = isset($_POST['archive_path']) ? wp_unslash($_POST['archive_path']) : '';
+        $archive_path = $archive_path_field ? WPMB_Backup_Manager::validate_path($archive_path_field) : null;
+
+        if (!$archive_path && $archive_id) {
+            $archive_path = WPMB_Backup_Manager::resolve_id($archive_id);
+        }
+
+        if (!$archive_path) {
+            wp_send_json_error(['message' => __('Backup archive not found.', 'wpmb')]);
+        }
+
+        WPMB_Log::write('Restore operation initiated by user via AJAX', [
+            'user' => wp_get_current_user()->user_login,
+            'archive' => basename($archive_path),
+        ]);
+
+        try {
+            WPMB_Restore_Manager::restore([
+                'archive_id' => $archive_id,
+                'archive_path' => $archive_path,
+                'drop_tables' => true,
+                'safety_backup' => true,
+            ]);
+
+            wp_send_json_success([
+                'message' => __('✓ Restore completed successfully! Your site has been updated with the backup data.', 'wpmb'),
+            ]);
+        } catch (Throwable $e) {
+            WPMB_Log::write('Restore operation failed via AJAX', [
+                'user' => wp_get_current_user()->user_login,
+                'error' => $e->getMessage(),
+            ]);
+
+            $errorMsg = $e->getMessage();
+            $isRolledBack = strpos($errorMsg, 'restored to its previous') !== false;
+            $isCritical = strpos($errorMsg, 'CRITICAL ERROR') !== false;
+
+            if ($isCritical) {
+                $userMessage = '⚠️ CRITICAL: ' . $errorMsg;
+            } elseif ($isRolledBack) {
+                $userMessage = '⚠️ ' . $errorMsg . ' Your site is still working normally.';
+            } else {
+                $userMessage = '⚠️ Restore failed: ' . $errorMsg;
+            }
+
+            wp_send_json_error(['message' => $userMessage]);
+        }
+    }
+
+    public static function ajax_get_logs()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        $logs = self::tail_logs(20);
+        wp_send_json_success(['logs' => implode("\n", $logs)]);
+    }
+
+    public static function ajax_clear_logs()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        try {
+            $log_dir = WPMB_Paths::logs_dir();
+            $files = glob($log_dir . '/*.log');
+            $deleted = 0;
+
+            if ($files) {
+                foreach ($files as $file) {
+                    if (unlink($file)) {
+                        $deleted++;
+                    }
+                }
+            }
+
+            WPMB_Log::write('Logs cleared by user', [
+                'user' => wp_get_current_user()->user_login,
+                'files_deleted' => $deleted,
+            ]);
+
+            wp_send_json_success([
+                'message' => sprintf(__('%d log file(s) cleared successfully.', 'wpmb'), $deleted),
+            ]);
+        } catch (Throwable $e) {
+            wp_send_json_error(['message' => $e->getMessage()]);
+        }
+    }
+
+    public static function ajax_check_operation_status()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        // Check if any operation is in progress
+        $backup_lock = WPMB_Lock::is_locked('backup');
+        $restore_lock = WPMB_Lock::is_locked('restore');
+
+        wp_send_json_success([
+            'backup_in_progress' => $backup_lock,
+            'restore_in_progress' => $restore_lock,
+        ]);
     }
 }
