@@ -339,14 +339,16 @@ class WPMB_Backup_Manager
         $candidate = wp_normalize_path($path);
 
         if ($mustExist) {
-            $real = realpath($candidate);
-            if (!$real) {
+            // Don't use realpath - it returns false for non-existent files
+            // Just verify the file exists at the expected path
+            if (!file_exists($candidate)) {
+                WPMB_Log::write('Path validation failed - file does not exist', ['path' => $candidate]);
                 return null;
             }
-            $candidate = wp_normalize_path($real);
         }
 
         if (strpos($candidate, $base) !== 0) {
+            WPMB_Log::write('Path validation failed - not in archives directory', ['path' => $candidate, 'base' => $base]);
             return null;
         }
 

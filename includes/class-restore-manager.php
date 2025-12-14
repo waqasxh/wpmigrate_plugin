@@ -218,7 +218,7 @@ class WPMB_Restore_Manager
 
             // Attempt to rollback using safety backup
             if ($safetyBackupPath && file_exists($safetyBackupPath)) {
-                WPMB_Log::write('Rolling back to safety backup', ['safety_backup' => basename($safetyBackupPath)]);
+                WPMB_Log::write('Rolling back to safety backup', ['safety_backup' => basename($safetyBackupPath), 'path' => $safetyBackupPath]);
                 try {
                     self::rollback_from_safety_backup($safetyBackupPath);
                     WPMB_Log::write('Rollback completed successfully - your site has been restored to its previous state');
@@ -234,6 +234,8 @@ class WPMB_Restore_Manager
                     );
                 }
             } else {
+                $backupStatus = $safetyBackupPath ? 'path exists but file missing' : 'no path available';
+                WPMB_Log::write('Cannot rollback - safety backup not available', ['status' => $backupStatus, 'path' => $safetyBackupPath ?? 'null']);
                 throw new RuntimeException('Restore failed: ' . $e->getMessage() . ' | No safety backup was available.');
             }
         } finally {

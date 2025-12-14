@@ -3,10 +3,10 @@
 /**
  * Plugin Name: WP Migrate Lite
  * Description: Full-stack backup and restore toolkit for zero-downtime WordPress migrations.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Requires at least: 5.8
  * Requires PHP: 7.4
- * Author: A2Z Systems
+ * Author: NextGen Digital
  * License: GPL-2.0-or-later
  */
 
