@@ -1,5 +1,7 @@
 # WP Migrate Lite
 
+**Developed by [NextGen Digital](https://nextgendigital.uk/)**
+
 WP Migrate Lite is a point-and-click backup and restore utility that installs as a WordPress admin plugin. It creates verifiable archives containing the database dump and `wp-content`, applies safety snapshots before restores, and keeps a comprehensive event log so migrations between live and local sites stay predictable.
 
 ## Feature Highlights
@@ -43,6 +45,15 @@ You can repeat the same flow in reverse to push local changes back to live—gen
 - All actions log to `wp-content/wpmb-backups/logs/wpmb-YYYY-MM-DD.log`, and the latest entries surface in the admin panel.
 - A safety backup labeled `pre-restore` is created automatically before any restore, providing an immediate rollback point.
 - If restore fails, the plugin automatically restores your previous state and displays a clear error message.
+- **User preservation (default on):** By default, `preserve_users => true` is active during every restore — the target site's user accounts, passwords, and roles are never overwritten. To import users from the source backup instead (e.g. when migrating an entire site including user accounts), pass `'preserve_users' => false` programmatically:
+
+  ```php
+  WPMB_Restore_Manager::restore( $backupId, [
+      'preserve_users' => false,
+  ] );
+  ```
+
+  > **Warning:** `preserve_users => false` replaces all users on the target with those from the backup. Use with caution on live sites.
 
 ## Recent Fixes & Enhancements
 

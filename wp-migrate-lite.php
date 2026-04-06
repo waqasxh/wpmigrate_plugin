@@ -7,6 +7,7 @@
  * Requires at least: 5.8
  * Requires PHP: 7.4
  * Author: NextGen Digital
+ * Author URI: https://nextgendigital.uk/
  * License: GPL-2.0-or-later
  */
 

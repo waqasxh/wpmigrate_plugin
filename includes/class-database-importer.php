@@ -9,7 +9,7 @@ class WPMB_Database_Importer
         $this->wpdb = $wpdb;
     }
 
-    public function import($sqlFile, array $tables, $dropExisting = true)
+    public function import($sqlFile, array $tables, $dropExisting = true, array $skipTables = [])
     {
         if (!file_exists($sqlFile)) {
             WPMB_Log::write('Database import failed - SQL file not found', ['sql_file' => $sqlFile]);
@@ -22,6 +22,7 @@ class WPMB_Database_Importer
             'filesize' => size_format($filesize),
             'num_known_tables' => count($tables),
             'drop_existing' => $dropExisting,
+            'skip_tables' => $skipTables,
         ]);
 
         $this->wpdb->query('SET FOREIGN_KEY_CHECKS=0');
@@ -29,11 +30,14 @@ class WPMB_Database_Importer
         if ($dropExisting) {
             WPMB_Log::write('Dropping existing tables', ['num_tables' => count($tables)]);
             foreach ($tables as $table) {
+                if (in_array($table, $skipTables, true)) {
+                    continue;
+                }
                 $this->wpdb->query('DROP TABLE IF EXISTS ' . $this->escape_identifier($table));
             }
 
             WPMB_Log::write('Dropping tables with current prefix', ['prefix' => $this->wpdb->prefix]);
-            $this->drop_tables_with_prefix($this->wpdb->prefix);
+            $this->drop_tables_with_prefix($this->wpdb->prefix, $skipTables);
         }
 
         $handle = fopen($sqlFile, 'r');
@@ -61,16 +65,22 @@ class WPMB_Database_Importer
 
             $statement .= $line;
             if (substr(rtrim($line), -1) === ';') {
-                try {
-                    $this->run_statement($statement, $statement_start_line);
-                    $statements_executed++;
-                } catch (RuntimeException $e) {
-                    WPMB_Log::write('SQL import failed at statement', [
-                        'line' => $statement_start_line,
-                        'statement_preview' => substr($statement, 0, 200),
-                        'error' => $e->getMessage(),
+                if ($skipTables && $this->statement_targets_table($statement, $skipTables)) {
+                    WPMB_Log::write('Skipped SQL statement for preserved table', [
+                        'statement_preview' => substr(ltrim($statement), 0, 100),
                     ]);
-                    throw $e;
+                } else {
+                    try {
+                        $this->run_statement($statement, $statement_start_line);
+                        $statements_executed++;
+                    } catch (RuntimeException $e) {
+                        WPMB_Log::write('SQL import failed at statement', [
+                            'line' => $statement_start_line,
+                            'statement_preview' => substr($statement, 0, 200),
+                            'error' => $e->getMessage(),
+                        ]);
+                        throw $e;
+                    }
                 }
                 $statement = '';
 
@@ -93,7 +103,7 @@ class WPMB_Database_Importer
         ]);
     }
 
-    public function ensure_prefix(array $tables, $sourcePrefix, $targetPrefix)
+    public function ensure_prefix(array $tables, $sourcePrefix, $targetPrefix, array $skipTables = [])
     {
         $sourcePrefix = (string) $sourcePrefix;
         $targetPrefix = (string) $targetPrefix;
@@ -121,6 +131,10 @@ class WPMB_Database_Importer
         $renames = [];
         foreach ($tables as $table) {
             if (strpos($table, $sourcePrefix) !== 0) {
+                continue;
+            }
+
+            if (in_array($table, $skipTables, true)) {
                 continue;
             }
 
@@ -163,7 +177,7 @@ class WPMB_Database_Importer
         return $this->wpdb->get_col('SHOW TABLES');
     }
 
-    public function drop_tables_with_prefix($prefix)
+    public function drop_tables_with_prefix($prefix, array $except = [])
     {
         $prefix = (string) $prefix;
         if ($prefix === '') {
@@ -172,6 +186,9 @@ class WPMB_Database_Importer
 
         $tables = $this->list_tables($prefix . '%');
         foreach ($tables as $table) {
+            if (in_array($table, $except, true)) {
+                continue;
+            }
             $this->wpdb->query('DROP TABLE IF EXISTS ' . $this->escape_identifier($table));
         }
     }
@@ -219,8 +236,118 @@ class WPMB_Database_Importer
         }
     }
 
+    /**
+     * After table-level prefix renaming, fix any option_name values in wp_options
+     * and meta_key values in wp_usermeta that still carry the old source prefix.
+     *
+     * Examples:
+     *   www227201_user_roles  → wp_user_roles  (role definitions; WP looks up $prefix.'user_roles')
+     *   www227201_capabilities → wp_capabilities (user caps; WP looks up $prefix.'capabilities')
+     *   www227201_user_level   → wp_user_level
+     *
+     * Without this step, admin login works but WordPress cannot resolve any roles or
+     * capabilities, making the site appear broken and blocking wp-admin access.
+     *
+     * @param string $sourcePrefix    Original table prefix from the backup (e.g. 'www227201_').
+     * @param string $targetPrefix    Table prefix in use on this install (e.g. 'wp_').
+     * @param bool   $includeUsermeta Also fix wp_usermeta.meta_key rows. Pass false when
+     *                                the target's user tables were preserved so we do not
+     *                                overwrite capability rows that are already correct.
+     */
+    public function fix_prefix_in_data($sourcePrefix, $targetPrefix, $includeUsermeta = true)
+    {
+        if ($sourcePrefix === '' || $targetPrefix === '' || $sourcePrefix === $targetPrefix) {
+            WPMB_Log::write('Prefix-in-data fix skipped - prefixes identical or empty', [
+                'source' => $sourcePrefix,
+                'target' => $targetPrefix,
+            ]);
+            return;
+        }
+
+        WPMB_Log::write('Fixing prefix-keyed rows in options / usermeta', [
+            'source_prefix' => $sourcePrefix,
+            'target_prefix' => $targetPrefix,
+            'fix_usermeta'  => $includeUsermeta,
+        ]);
+
+        // --- wp_options: rename option_name rows that start with the source prefix ---
+        $options_table = $targetPrefix . 'options';
+        if ($this->table_exists($options_table)) {
+            $like = $this->wpdb->esc_like($sourcePrefix) . '%';
+            $rows = $this->wpdb->get_results(
+                $this->wpdb->prepare(
+                    "SELECT option_id, option_name FROM `{$options_table}` WHERE option_name LIKE %s",
+                    $like
+                )
+            );
+            $count = 0;
+            foreach ($rows as $row) {
+                $newName = $targetPrefix . substr($row->option_name, strlen($sourcePrefix));
+                $this->wpdb->update(
+                    $options_table,
+                    ['option_name' => $newName],
+                    ['option_id'   => $row->option_id]
+                );
+                $count++;
+            }
+            WPMB_Log::write('Fixed option_name prefixes in options table', [
+                'table' => $options_table,
+                'count' => $count,
+            ]);
+        }
+
+        if (!$includeUsermeta) {
+            WPMB_Log::write('Usermeta prefix fix skipped - target user tables preserved');
+            return;
+        }
+
+        // --- wp_usermeta: rename meta_key rows that start with the source prefix ---
+        $usermeta_table = $targetPrefix . 'usermeta';
+        if ($this->table_exists($usermeta_table)) {
+            $like = $this->wpdb->esc_like($sourcePrefix) . '%';
+            $rows = $this->wpdb->get_results(
+                $this->wpdb->prepare(
+                    "SELECT umeta_id, meta_key FROM `{$usermeta_table}` WHERE meta_key LIKE %s",
+                    $like
+                )
+            );
+            $count = 0;
+            foreach ($rows as $row) {
+                $newKey = $targetPrefix . substr($row->meta_key, strlen($sourcePrefix));
+                $this->wpdb->update(
+                    $usermeta_table,
+                    ['meta_key' => $newKey],
+                    ['umeta_id' => $row->umeta_id]
+                );
+                $count++;
+            }
+            WPMB_Log::write('Fixed meta_key prefixes in usermeta table', [
+                'table' => $usermeta_table,
+                'count' => $count,
+            ]);
+        }
+    }
+
     private function escape_identifier($value)
     {
         return '`' . str_replace('`', '``', $value) . '`';
+    }
+
+    /**
+     * Returns true if the SQL statement operates on one of the given table names.
+     * Matches DROP TABLE, CREATE TABLE, INSERT INTO, LOCK TABLES, ALTER TABLE.
+     */
+    private function statement_targets_table($statement, array $tableNames)
+    {
+        foreach ($tableNames as $table) {
+            $t = preg_quote($table, '/');
+            if (preg_match(
+                '/(?:DROP\s+TABLE|CREATE\s+TABLE|INSERT\s+INTO|LOCK\s+TABLES|ALTER\s+TABLE)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?[`\'"]*' . $t . '[`\'"]*[\s(,;]/i',
+                $statement
+            )) {
+                return true;
+            }
+        }
+        return false;
     }
 }

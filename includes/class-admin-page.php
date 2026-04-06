@@ -259,6 +259,9 @@ class WPMB_Admin_Page
                 </p>
             <?php endif; ?>
         </div>
+        <p style="margin-top:2em;color:#666;font-size:12px;">
+            WP Migrate Lite &mdash; Developed by <a href="https://nextgendigital.uk/" target="_blank" rel="noopener noreferrer">NextGen Digital</a>
+        </p>
 <?php
     }
 

@@ -10,7 +10,8 @@ class WPMB_Replace
             return;
         }
 
-        $tables = [
+        // Start with core tables to ensure they are processed first.
+        $core_tables = [
             $wpdb->options,
             $wpdb->posts,
             $wpdb->postmeta,
@@ -22,6 +23,17 @@ class WPMB_Replace
             $wpdb->termmeta,
             $wpdb->usermeta,
         ];
+
+        // Also include all additional tables with the site prefix (e.g. Elementor,
+        // Rank Math, SureMail, WPForms, ActionScheduler, etc.) so that every URL
+        // stored by a plugin is updated, not only the WP core tables.
+        $all_prefixed = $wpdb->get_col(
+            $wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix) . '%')
+        );
+
+        $extra_tables = array_diff($all_prefixed, $core_tables);
+
+        $tables = array_merge($core_tables, $extra_tables);
 
         $total_replacements = 0;
         $total_rows_updated = 0;
@@ -114,29 +126,62 @@ class WPMB_Replace
     private static function replace_value($value, $old, $new)
     {
         if (is_serialized($value)) {
-            $data = @unserialize($value);
-            if ($data !== false) {
-                $data = self::walk($data, $old, $new);
-                return serialize($data);
-            }
+            return self::replace_in_serialized($value, $old, $new);
         }
         return str_replace($old, $new, $value);
     }
 
-    private static function walk($data, $old, $new)
+    /**
+     * Replace $old with $new inside a serialized string without unserializing it.
+     *
+     * Avoids class-not-found errors (e.g. Elementor objects) that occur when
+     * unserialize() encounters a class that is not loaded in the current context.
+     * Iterates over every s:N:"..." token using the declared byte-length so that
+     * embedded quotes or semicolons never confuse the parser, then recalculates
+     * the length after the replacement.
+     */
+    private static function replace_in_serialized($data, $old, $new)
     {
-        if (is_array($data)) {
-            foreach ($data as $k => $v) {
-                $data[$k] = self::walk($v, $old, $new);
-            }
-        } elseif (is_object($data)) {
-            foreach (get_object_vars($data) as $k => $v) {
-                $data->$k = self::walk($v, $old, $new);
-            }
-        } elseif (is_string($data)) {
-            $data = str_replace($old, $new, $data);
+        if (strpos($data, $old) === false) {
+            return $data;
         }
-        return $data;
+
+        $result = '';
+        $offset = 0;
+        $len    = strlen($data);
+
+        while ($offset < $len) {
+            // Find the next serialized-string token: s:<digits>:"
+            if (!preg_match('/s:(\d+):"/', $data, $m, PREG_OFFSET_CAPTURE, $offset)) {
+                $result .= substr($data, $offset);
+                break;
+            }
+
+            $tag_start  = (int) $m[0][1];
+            $str_length = (int) $m[1][0];
+            $str_start  = $tag_start + strlen($m[0][0]);
+            $str_end    = $str_start + $str_length;
+
+            // Verify the closing `";` follows the declared byte count.
+            if ($str_end + 2 > $len || substr($data, $str_end, 2) !== '";') {
+                // Malformed token – copy one character and keep scanning.
+                $result .= substr($data, $offset, $tag_start - $offset + 1);
+                $offset  = $tag_start + 1;
+                continue;
+            }
+
+            // Copy everything before this token verbatim.
+            $result .= substr($data, $offset, $tag_start - $offset);
+
+            // Perform replacement inside the string value and fix the length.
+            $str_value = substr($data, $str_start, $str_length);
+            $str_value = str_replace($old, $new, $str_value);
+            $result   .= 's:' . strlen($str_value) . ':"' . $str_value . '";';
+
+            $offset = $str_end + 2; // advance past closing `";"
+        }
+
+        return $result;
     }
 
     private static function table_exists($table)

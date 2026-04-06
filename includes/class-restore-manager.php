@@ -9,6 +9,7 @@ class WPMB_Restore_Manager
             'source_url' => null,
             'drop_tables' => true,
             'safety_backup' => true,
+            'preserve_users' => true,
             'label' => 'incoming',
         ]);
 
@@ -93,12 +94,40 @@ class WPMB_Restore_Manager
                 try {
                     $importer = new WPMB_Database_Importer();
                     $knownTables = $manifest['tables'] ?? [];
-                    $importer->import($tempDir . '/database.sql', $knownTables, (bool) $options['drop_tables']);
+
+                    // Restore the '' fallback so ensure_prefix() can auto-detect the source
+                    // prefix for older backups that may not carry the table_prefix field.
+                    // Build the skip list separately: fall back to target prefix when the
+                    // source prefix is unknown so target user tables are always protected.
+                    $sourcePrefix = $manifest['table_prefix'] ?? '';
+                    $skipTables = [];
+                    if (!empty($options['preserve_users'])) {
+                        $prefixForSkip = $sourcePrefix ?: $wpdb->prefix;
+                        $skipTables = [
+                            $prefixForSkip . 'users',
+                            $prefixForSkip . 'usermeta',
+                        ];
+                        WPMB_Log::write('Preserving target users - skipping user tables from backup', [
+                            'skip_tables' => $skipTables,
+                        ]);
+                    }
+
+                    $importer->import($tempDir . '/database.sql', $knownTables, (bool) $options['drop_tables'], $skipTables);
 
                     WPMB_Log::write('Database imported, processing table prefixes');
-                    $sourcePrefix = $manifest['table_prefix'] ?? '';
                     $tableInventory = $knownTables ?: $importer->list_tables();
-                    $importer->ensure_prefix($tableInventory, $sourcePrefix, $wpdb->prefix);
+                    $importer->ensure_prefix($tableInventory, $sourcePrefix, $wpdb->prefix, $skipTables);
+
+                    // Fix option_name / meta_key rows that still carry the source prefix after
+                    // the table-level rename. Without this, WordPress cannot find wp_user_roles
+                    // or wp_capabilities and the site has no roles/users even after a pw reset.
+                    // When preserve_users is true the target's usermeta already has the correct
+                    // prefix, so skip usermeta to avoid overwriting those rows.
+                    $importer->fix_prefix_in_data(
+                        $sourcePrefix,
+                        $wpdb->prefix,
+                        empty($options['preserve_users']) // includeUsermeta
+                    );
 
                     $manifest['table_prefix'] = $wpdb->prefix;
                     $manifest['tables'] = $importer->list_tables($wpdb->prefix . '%');
@@ -139,6 +168,37 @@ class WPMB_Restore_Manager
                             'to' => $newSiteUrl,
                         ]);
                         WPMB_Replace::run($oldSiteUrl, $newSiteUrl);
+
+                        // Replace the http:// counterpart (mixed-protocol sites).
+                        $oldSiteUrlHttp = self::swap_protocol($oldSiteUrl);
+                        if ($oldSiteUrlHttp !== $oldSiteUrl && $oldSiteUrlHttp !== $newSiteUrl) {
+                            WPMB_Log::write('Replacing http variant of site URL', [
+                                'from' => $oldSiteUrlHttp,
+                                'to'   => $newSiteUrl,
+                            ]);
+                            WPMB_Replace::run($oldSiteUrlHttp, $newSiteUrl);
+                        }
+
+                        // Replace the www ↔ non-www counterpart. Plugins like Rank Math,
+                        // Astra, and Elementor store the www-prefixed domain even when
+                        // siteurl omits it (and vice-versa), causing broken assets / UI.
+                        $oldSiteUrlWww = self::www_variant($oldSiteUrl);
+                        if ($oldSiteUrlWww !== $oldSiteUrl && $oldSiteUrlWww !== $newSiteUrl) {
+                            WPMB_Log::write('Replacing www variant of site URL', [
+                                'from' => $oldSiteUrlWww,
+                                'to'   => $newSiteUrl,
+                            ]);
+                            WPMB_Replace::run($oldSiteUrlWww, $newSiteUrl);
+
+                            $oldSiteUrlWwwHttp = self::swap_protocol($oldSiteUrlWww);
+                            if ($oldSiteUrlWwwHttp !== $oldSiteUrlWww && $oldSiteUrlWwwHttp !== $newSiteUrl) {
+                                WPMB_Log::write('Replacing http+www variant of site URL', [
+                                    'from' => $oldSiteUrlWwwHttp,
+                                    'to'   => $newSiteUrl,
+                                ]);
+                                WPMB_Replace::run($oldSiteUrlWwwHttp, $newSiteUrl);
+                            }
+                        }
                     }
 
                     if ($oldHomeUrl && $oldHomeUrl !== $newHomeUrl && $oldHomeUrl !== $oldSiteUrl) {
@@ -147,6 +207,33 @@ class WPMB_Restore_Manager
                             'to' => $newHomeUrl,
                         ]);
                         WPMB_Replace::run($oldHomeUrl, $newHomeUrl);
+
+                        $oldHomeUrlHttp = self::swap_protocol($oldHomeUrl);
+                        if ($oldHomeUrlHttp !== $oldHomeUrl && $oldHomeUrlHttp !== $newHomeUrl && $oldHomeUrlHttp !== $oldSiteUrl) {
+                            WPMB_Log::write('Replacing http variant of home URL', [
+                                'from' => $oldHomeUrlHttp,
+                                'to'   => $newHomeUrl,
+                            ]);
+                            WPMB_Replace::run($oldHomeUrlHttp, $newHomeUrl);
+                        }
+
+                        $oldHomeUrlWww = self::www_variant($oldHomeUrl);
+                        if ($oldHomeUrlWww !== $oldHomeUrl && $oldHomeUrlWww !== $newHomeUrl && $oldHomeUrlWww !== $oldSiteUrl) {
+                            WPMB_Log::write('Replacing www variant of home URL', [
+                                'from' => $oldHomeUrlWww,
+                                'to'   => $newHomeUrl,
+                            ]);
+                            WPMB_Replace::run($oldHomeUrlWww, $newHomeUrl);
+
+                            $oldHomeUrlWwwHttp = self::swap_protocol($oldHomeUrlWww);
+                            if ($oldHomeUrlWwwHttp !== $oldHomeUrlWww && $oldHomeUrlWwwHttp !== $newHomeUrl) {
+                                WPMB_Log::write('Replacing http+www variant of home URL', [
+                                    'from' => $oldHomeUrlWwwHttp,
+                                    'to'   => $newHomeUrl,
+                                ]);
+                                WPMB_Replace::run($oldHomeUrlWwwHttp, $newHomeUrl);
+                            }
+                        }
                     }
 
                     // Update options table directly for safety
@@ -161,6 +248,17 @@ class WPMB_Restore_Manager
                         ['option_value' => $newHomeUrl],
                         ['option_name' => 'home']
                     );
+
+                    // Flush WordPress rewrite rules so that .htaccess is regenerated
+                    // on the target server (critical when the target had empty rewrite
+                    // rules or a different permalink structure).
+                    WPMB_Log::write('Flushing rewrite rules');
+                    flush_rewrite_rules(true);
+
+                    // Clear the WordPress object cache so no stale data from the
+                    // previous database is served after restore.
+                    WPMB_Log::write('Clearing object cache');
+                    wp_cache_flush();
 
                     // Repair and optimize database tables
                     WPMB_Log::write('Repairing and optimizing database tables');
@@ -195,11 +293,21 @@ class WPMB_Restore_Manager
                 try {
                     WPMB_File_Archiver::copy_directory($tempDir . '/wp-content', WP_CONTENT_DIR);
                     WPMB_Log::write('Files restored successfully');
+
+                    // Elementor caches compiled CSS in uploads/elementor/css/.
+                    // These files bake in absolute URLs from the source domain.
+                    // Delete them so Elementor regenerates them for the new domain
+                    // on the first page load (applies to both free and Pro).
+                    self::clear_elementor_css_cache();
                 } catch (Exception $e) {
                     WPMB_Log::write('WARNING: File restoration failed', ['error' => $e->getMessage()]);
                     // Don't throw - database is already restored, files are less critical
                     WPMB_Log::write('Continuing despite file restoration failure - database was restored successfully');
                 }
+            } else {
+                // Files not included in archive; still clear any Elementor CSS that
+                // is already present on the target with old domain references.
+                self::clear_elementor_css_cache();
             }
 
             $restoreSuccessful = true;
@@ -353,5 +461,86 @@ class WPMB_Restore_Manager
         WPMB_Paths::cleanup_temp();
 
         WPMB_Log::write('ROLLBACK: Completed successfully - site restored to previous state');
+    }
+
+    /**
+     * Returns the http:// variant of an https:// URL (or vice-versa).
+     * Used to replace mixed-protocol URLs left over in the source database.
+     */
+    private static function swap_protocol($url)
+    {
+        if (strpos($url, 'https://') === 0) {
+            return 'http://' . substr($url, 8);
+        }
+        if (strpos($url, 'http://') === 0) {
+            return 'https://' . substr($url, 7);
+        }
+        return $url;
+    }
+
+    /**
+     * Returns the www ↔ non-www counterpart of a URL.
+     *
+     * https://example.com     → https://www.example.com
+     * https://www.example.com → https://example.com
+     *
+     * Plugins like Rank Math, Astra, and Elementor often store the www-prefixed
+     * domain even when siteurl is registered without www (and vice-versa), so
+     * both variants must be replaced during migration.
+     *
+     * IP addresses and localhost are returned unchanged.
+     */
+    private static function www_variant($url)
+    {
+        $parsed = wp_parse_url($url);
+        $host   = $parsed['host'] ?? '';
+
+        if ($host === '' || $host === 'localhost' || filter_var($host, FILTER_VALIDATE_IP)) {
+            return $url;
+        }
+
+        if (strncmp($host, 'www.', 4) === 0) {
+            $newHost = substr($host, 4);
+        } else {
+            $newHost = 'www.' . $host;
+        }
+
+        $scheme = ($parsed['scheme'] ?? 'https') . '://';
+        $path   = isset($parsed['path']) ? rtrim($parsed['path'], '/') : '';
+
+        return $scheme . $newHost . $path;
+    }
+
+    /**
+     * Deletes Elementor's compiled CSS cache files so they are regenerated
+     * with the new domain on first page load after a migration.
+     *
+     * Handles the standard location (uploads/elementor/css) and Elementor Pro's
+     * global CSS file.  Safe to call even when Elementor is not installed.
+     */
+    private static function clear_elementor_css_cache()
+    {
+        $upload_dir   = wp_upload_dir();
+        $elementor_css = trailingslashit($upload_dir['basedir']) . 'elementor/css';
+
+        if (! is_dir($elementor_css)) {
+            return;
+        }
+
+        $files   = glob($elementor_css . '/*.css');
+        $deleted = 0;
+
+        if ($files) {
+            foreach ($files as $file) {
+                if (@unlink($file)) {
+                    $deleted++;
+                }
+            }
+        }
+
+        WPMB_Log::write('Elementor CSS cache cleared', [
+            'directory'     => $elementor_css,
+            'files_deleted' => $deleted,
+        ]);
     }
 }
