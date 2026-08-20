@@ -34,6 +34,10 @@ class WPMB_Plugin
         add_action('admin_post_nopriv_wpmb_download', ['WPMB_Download_Handler', 'serve']);
         add_action('init', ['WPMB_Token', 'purge_expired']);
 
+        // CLI command registration lives in wp-migrate-lite.php at plugin
+        // top-level scope (see comment there) - plugins_loaded fires too late
+        // for WP-CLI to see the command.
+
         if (!wp_next_scheduled('wpmb_daily_housekeeping')) {
             wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'wpmb_daily_housekeeping');
             WPMB_Log::write('Scheduled daily housekeeping task');

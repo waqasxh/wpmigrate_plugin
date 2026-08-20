@@ -17,6 +17,24 @@ class WPMB_Restore_Manager
         $safetyBackupPath = null;
         $restoreSuccessful = false;
 
+        // Large archives can take longer than the host's default PHP execution
+        // limit (import + rollback of a 300-600MB backup routinely exceeds it,
+        // per 2026-08-20 incident where the rollback was killed mid-run with no
+        // exception logged). Best-effort only - some hosts enforce a hard
+        // request-terminate timeout at the FPM/webserver level that this cannot
+        // override, which is why CLI (`wp wpmb restore`) is the recommended way
+        // to run restores - CLI SAPI has no such limit by default.
+        @set_time_limit(0);
+        @ignore_user_abort(true);
+
+        // Block WP-Cron and regular visitor traffic for the duration of the
+        // restore (including any rollback). Without this, a concurrent request
+        // can recreate a table WordPress/a plugin auto-installs (e.g. Action
+        // Scheduler's tables) in the gap between this process dropping it and
+        // re-creating it from the dump, causing "table already exists" import
+        // failures - exactly what happened on 2026-08-20.
+        WPMB_Maintenance::on();
+
         try {
             global $wpdb;
             $path = self::resolve_archive_path($options);
@@ -107,6 +125,16 @@ class WPMB_Restore_Manager
                             $prefixForSkip . 'users',
                             $prefixForSkip . 'usermeta',
                         ];
+                        // When the source and target prefixes differ, the DROP phase calls
+                        // drop_tables_with_prefix( $wpdb->prefix, $skipTables ). That method
+                        // only skips names that appear literally in $skipTables, so the
+                        // existing target-prefixed user tables (wp_users / wp_usermeta) get
+                        // dropped even though we never import replacements for them.
+                        // Add the target-prefixed names so they are preserved too.
+                        if ($prefixForSkip !== $wpdb->prefix) {
+                            $skipTables[] = $wpdb->prefix . 'users';
+                            $skipTables[] = $wpdb->prefix . 'usermeta';
+                        }
                         WPMB_Log::write('Preserving target users - skipping user tables from backup', [
                             'skip_tables' => $skipTables,
                         ]);
@@ -347,6 +375,7 @@ class WPMB_Restore_Manager
                 throw new RuntimeException('Restore failed: ' . $e->getMessage() . ' | No safety backup was available.');
             }
         } finally {
+            WPMB_Maintenance::off();
             WPMB_Lock::release($lock);
             WPMB_Paths::cleanup_temp();
         }

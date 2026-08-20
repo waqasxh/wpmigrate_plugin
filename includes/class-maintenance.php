@@ -1,12 +1,12 @@
 <?php
-class WPM_Maintenance {
+class WPMB_Maintenance {
     public static function on() {
         file_put_contents(ABSPATH . '.maintenance', '<?php $upgrading = time(); ?>');
-        WPM_Logger::log('Maintenance ON');
+        WPMB_Log::write('Maintenance mode ON');
     }
 
     public static function off() {
         @unlink(ABSPATH . '.maintenance');
-        WPM_Logger::log('Maintenance OFF');
+        WPMB_Log::write('Maintenance mode OFF');
     }
 }

@@ -12,8 +12,8 @@ class WPMB_CLI_Command
     {
         $options = [
             'label' => $assocArgs['label'] ?? 'cli',
-            'include_files' => !WP_CLI\Utils::get_flag_value($assocArgs, 'skip-files', false),
-            'include_database' => !WP_CLI\Utils::get_flag_value($assocArgs, 'skip-db', false),
+            'include_files' => !($assocArgs['skip-files'] ?? false),
+            'include_database' => !($assocArgs['skip-db'] ?? false),
             'retention' => isset($assocArgs['retention']) ? (int) $assocArgs['retention'] : 10,
         ];
 
@@ -33,8 +33,8 @@ class WPMB_CLI_Command
             'archive_id' => $args[0] ?? ($assocArgs['id'] ?? null),
             'archive_path' => $assocArgs['path'] ?? null,
             'source_url' => $assocArgs['url'] ?? null,
-            'drop_tables' => !WP_CLI\Utils::get_flag_value($assocArgs, 'keep-tables', false),
-            'safety_backup' => !WP_CLI\Utils::get_flag_value($assocArgs, 'no-backup', false),
+            'drop_tables' => !($assocArgs['keep-tables'] ?? false),
+            'safety_backup' => !($assocArgs['no-backup'] ?? false),
         ];
 
         try {
@@ -53,15 +53,13 @@ class WPMB_CLI_Command
             return;
         }
 
-        $items = [];
+        WP_CLI::line(str_pad('ID', 60) . str_pad('CREATED', 26) . 'SIZE');
         foreach ($archives as $archive) {
-            $items[] = [
-                'id' => $archive['id'],
-                'created' => $archive['created_at_gmt'],
-                'size' => size_format($archive['filesize']),
-            ];
+            WP_CLI::line(
+                str_pad($archive['id'], 60) .
+                str_pad($archive['created_at_gmt'], 26) .
+                size_format($archive['filesize'])
+            );
         }
-
-        WP_CLI\Utils::format_items('table', $items, ['id', 'created', 'size']);
     }
 }
