@@ -89,14 +89,15 @@ jQuery(document).ready(function ($) {
 
         var $status = $('#wpmb-restore-status');
 
-        $btn.prop('disabled', true).text('Restoring...');
-        $status.show().html('<strong>' + wpmbAdmin.strings.restoreInProgress + '</strong><br>Creating safety backup, importing database, replacing URLs, and restoring files...<br><em style="color:#666;">Do not close this page or click the button again.</em>');
+        $btn.prop('disabled', true).text('Starting Restore...');
+        $status.show().html('<strong>Starting restore process...</strong><br><em style="color:#666;">This will run in the background. Do not close this page.</em>');
         operationInProgress = true;
 
-        // Start status checking
-        startStatusChecking();
-
-        var ajaxRequest = $.ajax({
+        // Start the restore in background - mirrors the backup flow: this
+        // request only has to dispatch the background worker and return, the
+        // actual restore runs in its own process so a slow host can't kill it
+        // via the web request's execution-time limit.
+        $.ajax({
             url: wpmbAdmin.ajaxUrl,
             method: 'POST',
             data: {
@@ -105,60 +106,33 @@ jQuery(document).ready(function ($) {
                 archive_id: archiveId,
                 archive_path: archivePath
             },
-            timeout: 1800000, // 30 minutes for large sites
+            timeout: 10000, // 10 seconds - just to start the process
             success: function (response) {
-                stopStatusChecking();
-                operationInProgress = false;
+                console.log('Restore start response:', response);
 
-                if (response.success) {
-                    $status.css({ background: '#d4edda', borderColor: '#28a745' })
-                        .html('<strong>✓ ' + response.data.message + '</strong>');
+                if (response.success && response.data.started) {
+                    $btn.text('Restoring...');
+                    $status.html('<strong>⏳ ' + wpmbAdmin.strings.restoreInProgress + '</strong><br>Creating safety backup, importing database, replacing URLs, and restoring files. This may take several minutes.<br><em style="color:#666;">Do not close this page.</em>');
 
-                    // Refresh page after 3 seconds
-                    setTimeout(function () {
-                        window.location.reload();
-                    }, 3000);
+                    // Restore locks the site with WordPress's own maintenance
+                    // mode, which blocks admin-ajax.php too - poll the
+                    // standalone poll.php endpoint instead, using the token
+                    // this response just issued, so progress stays visible.
+                    startRestoreStatusPolling($btn, $status, originalText, response.data.poll_url, response.data.poll_token);
                 } else {
+                    console.error('Restore did not start:', response);
+                    operationInProgress = false;
                     $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
-                        .html('<strong>✗ Error:</strong> ' + response.data.message);
+                        .html('<strong>✗ Error:</strong> ' + (response.data ? response.data.message : 'Failed to start restore'));
                     $btn.prop('disabled', false).text(originalText);
                 }
-
-                // Auto-refresh logs
-                refreshLogs();
             },
             error: function (xhr, status, error) {
-                stopStatusChecking();
-
-                // Check if restore actually completed despite timeout
-                if (status === 'timeout') {
-                    $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
-                        .html('<strong>⚠️ Request timed out</strong><br>' +
-                            'The restore may still be running in the background. ' +
-                            'Please wait 2-3 minutes and refresh the page to check if it completed.<br>' +
-                            '<button type="button" class="button button-small" onclick="window.location.reload();" style="margin-top:10px;">Refresh Page Now</button>');
-
-                    // Don't reset operationInProgress immediately
-                    setTimeout(function () {
-                        operationInProgress = false;
-                        $btn.prop('disabled', false).text(originalText);
-                    }, 10000); // 10 seconds
-                } else {
-                    operationInProgress = false;
-
-                    // Try to get detailed error message
-                    var errorMsg = 'Request failed.';
-                    if (xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message) {
-                        errorMsg = xhr.responseJSON.data.message;
-                    } else if (xhr.responseText) {
-                        errorMsg = 'Server error. Check logs for details.';
-                    }
-
-                    $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
-                        .html('<strong>✗ Error:</strong> ' + errorMsg + '<br>Status: ' + status + '<br>Check the logs below for more details.');
-                    $btn.prop('disabled', false).text(originalText);
-                }
-
+                console.error('Restore start error:', { xhr: xhr, status: status, error: error, responseText: xhr.responseText });
+                operationInProgress = false;
+                $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
+                    .html('<strong>✗ Error:</strong> Failed to start restore process. ' + error);
+                $btn.prop('disabled', false).text(originalText);
                 refreshLogs();
             }
         });
@@ -316,6 +290,93 @@ jQuery(document).ready(function ($) {
 
                         $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
                             .html('<strong>⚠️ Polling timed out</strong><br>The backup may still be running. Refresh the page to check status.');
+                        $btn.prop('disabled', false).text(originalText);
+                    }
+                }
+            });
+        }, 5000); // Poll every 5 seconds
+    }
+
+    // Function to poll restore status. Restore holds WordPress's own
+    // maintenance mode for its duration, which blocks admin-ajax.php along
+    // with everything else, so this talks to the standalone poll.php
+    // endpoint (token-gated, no WordPress bootstrap) instead of the usual
+    // wp_ajax_ actions the rest of this file uses.
+    var restoreStatusInterval = null;
+    function startRestoreStatusPolling($btn, $status, originalText, pollUrl, pollToken) {
+        var pollCount = 0;
+        var maxPolls = 360; // 30 minutes (5 second intervals)
+
+        restoreStatusInterval = setInterval(function () {
+            pollCount++;
+
+            $.ajax({
+                url: pollUrl,
+                method: 'GET',
+                data: {
+                    op: 'restore',
+                    token: pollToken
+                },
+                success: function (response) {
+                    if (response.data && typeof response.data.recent_logs === 'string') {
+                        $('#wpmb-logs').text(response.data.recent_logs);
+                    }
+
+                    if (response.success) {
+                        if (response.data.completed) {
+                            // Restore completed successfully
+                            clearInterval(restoreStatusInterval);
+                            stopStatusChecking();
+                            operationInProgress = false;
+
+                            $status.css({ background: '#d4edda', borderColor: '#28a745' })
+                                .html('<strong>✓ ' + response.data.message + '</strong>');
+                            $btn.prop('disabled', false).text(originalText);
+
+                            // Refresh page after 2 seconds
+                            setTimeout(function () {
+                                window.location.reload();
+                            }, 2000);
+                        } else if (response.data.failed) {
+                            // Restore failed
+                            clearInterval(restoreStatusInterval);
+                            stopStatusChecking();
+                            operationInProgress = false;
+
+                            $status.css({ background: '#f8d7da', borderColor: '#dc3545' })
+                                .html('<strong>✗ Error:</strong> ' + response.data.message);
+                            $btn.prop('disabled', false).text(originalText);
+                            refreshLogs();
+                        } else if (!response.data.is_locked && pollCount > 5) {
+                            // Lock released but no completion message - check logs
+                            clearInterval(restoreStatusInterval);
+                            stopStatusChecking();
+                            operationInProgress = false;
+
+                            $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
+                                .html('<strong>⚠️ Restore status unclear</strong><br>The restore process stopped but status is unknown. Check logs below.');
+                            $btn.prop('disabled', false).text(originalText);
+                            refreshLogs();
+                            window.location.reload();
+                        }
+
+                        // Update status message with time elapsed
+                        if (!response.data.completed && !response.data.failed) {
+                            var elapsed = Math.floor(pollCount * 5 / 60);
+                            $status.html('<strong>⏳ Restore running...</strong><br>' +
+                                elapsed + ' minute(s) elapsed. Please wait...<br>' +
+                                '<em style=\"color:#666;\">Logs are updating below.</em>');
+                        }
+                    }
+
+                    // Stop after max polls (30 minutes)
+                    if (pollCount >= maxPolls) {
+                        clearInterval(restoreStatusInterval);
+                        stopStatusChecking();
+                        operationInProgress = false;
+
+                        $status.css({ background: '#fff3cd', borderColor: '#ffc107' })
+                            .html('<strong>⚠️ Polling timed out</strong><br>The restore may still be running. Refresh the page to check status.');
                         $btn.prop('disabled', false).text(originalText);
                     }
                 }

@@ -16,6 +16,8 @@ class WPMB_Admin_Page
         add_action('wp_ajax_wpmb_do_backup_background', [self::class, 'ajax_do_backup_background']);
         add_action('wp_ajax_wpmb_check_backup_status', [self::class, 'ajax_check_backup_status']);
         add_action('wp_ajax_wpmb_restore_backup_ajax', [self::class, 'ajax_restore_backup']);
+        add_action('wp_ajax_wpmb_do_restore_background', [self::class, 'ajax_do_restore_background']);
+        add_action('wp_ajax_wpmb_check_restore_status', [self::class, 'ajax_check_restore_status']);
         add_action('wp_ajax_wpmb_check_operation_status', [self::class, 'ajax_check_operation_status']);
         add_action('wp_ajax_wpmb_clear_logs', [self::class, 'ajax_clear_logs']);
         add_action('wp_ajax_wpmb_get_logs', [self::class, 'ajax_get_logs']);
@@ -300,56 +302,31 @@ class WPMB_Admin_Page
             self::redirect_with_notice(__('Backup archive not found. Refresh this page and try again.', 'wpmb'), 'error');
         }
 
+        // Restores can take several minutes on large sites - a synchronous
+        // call here runs inside this single request/response cycle, which is
+        // subject to the host's hard execution-time limit (Apache Timeout /
+        // PHP-FPM request_terminate_timeout). set_time_limit()/ini_set() can't
+        // override that, and a hard kill mid-restore can leave the automatic
+        // rollback safety net unable to finish (see the 2026-08-20 incident).
+        // Dispatch to the same non-blocking background worker the AJAX path
+        // uses instead of calling WPMB_Restore_Manager::restore() directly.
+        if (WPMB_Lock::is_locked('restore')) {
+            self::redirect_with_notice(__('A restore operation is already in progress.', 'wpmb'), 'error');
+        }
+
         WPMB_Log::write('Restore operation initiated by user', [
             'user' => wp_get_current_user()->user_login,
             'archive' => basename($archive_path),
             'archive_size' => size_format(filesize($archive_path)),
         ]);
 
-        try {
-            WPMB_Restore_Manager::restore([
-                'archive_id' => $archive_id,
-                'archive_path' => $archive_path,
-                'drop_tables' => true,
-                'safety_backup' => true,
-            ]);
-
-            WPMB_Log::write('Restore operation completed successfully by user', [
-                'user' => wp_get_current_user()->user_login,
-                'archive' => basename($archive_path),
-            ]);
-
-            self::redirect_with_notice(
-                __('✓ Restore completed successfully! Your site has been updated with the backup data.', 'wpmb')
-            );
-        } catch (Throwable $e) {
-            WPMB_Log::write('Restore operation failed', [
-                'user' => wp_get_current_user()->user_login,
-                'error' => $e->getMessage(),
-                'archive' => basename($archive_path),
-            ]);
-
-            // Check if this was a rollback error (contains specific text)
-            $errorMsg = $e->getMessage();
-            $isRolledBack = strpos($errorMsg, 'restored to its previous') !== false;
-            $isCritical = strpos($errorMsg, 'CRITICAL ERROR') !== false;
-
-            if ($isCritical) {
-                // Critical error - both restore and rollback failed
-                $userMessage = '⚠️ CRITICAL: ' . $errorMsg . ' Please check the logs for details and contact support if needed.';
-                $noticeType = 'error';
-            } elseif ($isRolledBack) {
-                // Restore failed but rollback succeeded
-                $userMessage = '⚠️ ' . $errorMsg . ' Your site is still working normally.';
-                $noticeType = 'error';
-            } else {
-                // Regular restore failure
-                $userMessage = '⚠️ Restore failed: ' . $errorMsg . ' Please check the logs for details.';
-                $noticeType = 'error';
-            }
-
-            self::redirect_with_notice($userMessage, $noticeType);
+        if (!self::dispatch_background_restore($archive_id, $archive_path)) {
+            self::redirect_with_notice(__('Failed to start the restore. Check logs and try again.', 'wpmb'), 'error');
         }
+
+        self::redirect_with_notice(
+            __('Restore started in the background. This can take several minutes on large sites - refresh this page or check Recent Logs below to see progress.', 'wpmb')
+        );
     }
 
     public static function handle_upload_backup()
@@ -503,6 +480,25 @@ class WPMB_Admin_Page
 
     private static function dispatch_background_backup($label)
     {
+        return self::dispatch_background_operation('wpmb_do_backup_background', ['label' => $label]);
+    }
+
+    private static function dispatch_background_restore($archiveId, $archivePath)
+    {
+        return self::dispatch_background_operation('wpmb_do_restore_background', [
+            'archive_id' => $archiveId,
+            'archive_path' => $archivePath,
+        ]);
+    }
+
+    /**
+     * Fire a non-blocking loopback request to admin-ajax.php so the real work
+     * happens in its own PHP process, outside the lifetime of the request that
+     * triggered it. This is what lets backup/restore survive longer than any
+     * single web request is allowed to run for.
+     */
+    private static function dispatch_background_operation($ajaxAction, array $body = [])
+    {
         $cookies = [];
 
         if (!empty($_COOKIE)) {
@@ -519,11 +515,10 @@ class WPMB_Admin_Page
         }
 
         $response = wp_remote_post(admin_url('admin-ajax.php'), [
-            'body' => [
-                'action' => 'wpmb_do_backup_background',
+            'body' => array_merge([
+                'action' => $ajaxAction,
                 'nonce' => wp_create_nonce('wpmb_background'),
-                'label' => $label,
-            ],
+            ], $body),
             'timeout' => 0.1,
             'blocking' => false,
             'sslverify' => apply_filters('https_local_ssl_verify', false),
@@ -535,11 +530,14 @@ class WPMB_Admin_Page
         ]);
 
         if (is_wp_error($response)) {
-            WPMB_Log::write('Failed to dispatch background backup', ['error' => $response->get_error_message()]);
+            WPMB_Log::write('Failed to dispatch background operation', [
+                'action' => $ajaxAction,
+                'error' => $response->get_error_message(),
+            ]);
             return false;
         }
 
-        WPMB_Log::write('Background backup dispatched', ['label' => $label]);
+        WPMB_Log::write('Background operation dispatched', ['action' => $ajaxAction]);
         return true;
     }
 
@@ -689,11 +687,6 @@ class WPMB_Admin_Page
             wp_send_json_error(['message' => __('A restore operation is already in progress. Please wait or clear the lock.', 'wpmb')]);
         }
 
-        // Increase execution limits for large sites
-        @set_time_limit(1800); // 30 minutes
-        @ini_set('memory_limit', '1024M'); // 1GB for large sites
-        @ini_set('max_execution_time', '1800');
-
         $archive_id = isset($_POST['archive_id']) ? sanitize_text_field(wp_unslash($_POST['archive_id'])) : '';
         $archive_path_field = isset($_POST['archive_path']) ? wp_unslash($_POST['archive_path']) : '';
         $archive_path = $archive_path_field ? WPMB_Backup_Manager::validate_path($archive_path_field) : null;
@@ -711,6 +704,64 @@ class WPMB_Admin_Page
             'archive' => basename($archive_path),
         ]);
 
+        // Restore engages WordPress's own maintenance mode for the duration
+        // (see WPMB_Restore_Manager::restore()), which blocks admin-ajax.php
+        // along with everything else - so issue a token for the standalone,
+        // non-WordPress poll.php endpoint before dispatching, or the browser
+        // would have no way to check progress until maintenance mode clears.
+        $poll_token = WPMB_Status_Endpoint::issue_token('restore');
+
+        // Dispatch to a background loopback request rather than running the
+        // restore inline here - this request must return quickly, the actual
+        // work happens in ajax_do_restore_background() in its own process so
+        // it isn't killed by the host's web-request execution-time limit.
+        if (!self::dispatch_background_restore($archive_id, $archive_path)) {
+            wp_send_json_error(['message' => __('Failed to dispatch background restore. Check site loopback requests and logs.', 'wpmb')]);
+        }
+
+        wp_send_json_success([
+            'started' => true,
+            'poll_url' => WPMB_Status_Endpoint::poll_url(),
+            'poll_token' => $poll_token,
+        ]);
+    }
+
+    public static function ajax_do_restore_background()
+    {
+        WPMB_Log::write('Background restore handler called', [
+            'post_data' => array_keys($_POST),
+            'has_nonce' => isset($_POST['nonce']),
+        ]);
+
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'wpmb_background')) {
+            WPMB_Log::write('Background restore - nonce verification failed');
+            return;
+        }
+
+        // Increase execution limits for large sites. Best-effort only - some
+        // hosts enforce a hard timeout at the FPM/webserver level that this
+        // can't override, which is exactly why this runs as its own detached
+        // process rather than inline in the request that triggered it.
+        @set_time_limit(1800); // 30 minutes
+        @ini_set('memory_limit', '1024M'); // 1GB for large sites
+        @ini_set('max_execution_time', '1800');
+        ignore_user_abort(true);
+
+        $archive_id = isset($_POST['archive_id']) ? sanitize_text_field(wp_unslash($_POST['archive_id'])) : '';
+        $archive_path_field = isset($_POST['archive_path']) ? wp_unslash($_POST['archive_path']) : '';
+        $archive_path = $archive_path_field ? WPMB_Backup_Manager::validate_path($archive_path_field) : null;
+
+        if (!$archive_path && $archive_id) {
+            $archive_path = WPMB_Backup_Manager::resolve_id($archive_id);
+        }
+
+        if (!$archive_path) {
+            WPMB_Lock::force_release('restore');
+            WPMB_Log::write('✗ Background restore failed', ['error' => 'Backup archive not found.']);
+            exit;
+        }
+
         try {
             WPMB_Restore_Manager::restore([
                 'archive_id' => $archive_id,
@@ -719,33 +770,59 @@ class WPMB_Admin_Page
                 'safety_backup' => true,
             ]);
 
-            wp_send_json_success([
-                'message' => __('✓ Restore completed successfully! Your site has been updated with the backup data.', 'wpmb'),
+            WPMB_Log::write('✓ Background restore completed successfully', [
+                'archive' => basename($archive_path),
             ]);
         } catch (Throwable $e) {
             // Ensure lock is released on error
             WPMB_Lock::force_release('restore');
 
-            WPMB_Log::write('Restore operation failed via AJAX', [
-                'user' => wp_get_current_user()->user_login,
+            WPMB_Log::write('✗ Background restore failed', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);
-
-            $errorMsg = $e->getMessage();
-            $isRolledBack = strpos($errorMsg, 'restored to its previous') !== false;
-            $isCritical = strpos($errorMsg, 'CRITICAL ERROR') !== false;
-
-            if ($isCritical) {
-                $userMessage = '⚠️ CRITICAL: ' . $errorMsg;
-            } elseif ($isRolledBack) {
-                $userMessage = '⚠️ ' . $errorMsg . ' Your site is still working normally.';
-            } else {
-                $userMessage = '⚠️ Restore failed: ' . $errorMsg;
-            }
-
-            wp_send_json_error(['message' => $userMessage]);
         }
+
+        exit;
+    }
+
+    public static function ajax_check_restore_status()
+    {
+        check_ajax_referer('wpmb_ajax', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => __('Insufficient permissions.', 'wpmb')]);
+        }
+
+        $is_locked = WPMB_Lock::is_locked('restore');
+        $recent_logs = self::tail_logs(80);
+
+        $completed = false;
+        $failed = false;
+        $message = '';
+
+        foreach ($recent_logs as $log) {
+            if (strpos($log, '✓ Background restore completed successfully') !== false) {
+                $completed = true;
+                $message = 'Restore completed successfully! Your site has been updated with the backup data.';
+                break;
+            } elseif (strpos($log, '✗ Background restore failed') !== false) {
+                $failed = true;
+                if (preg_match('/"error":"([^"]+)"/', $log, $matches)) {
+                    $message = stripslashes($matches[1]);
+                } else {
+                    $message = 'Restore failed. Check logs for details.';
+                }
+                break;
+            }
+        }
+
+        wp_send_json_success([
+            'is_locked' => $is_locked,
+            'completed' => $completed,
+            'failed' => $failed,
+            'message' => $message,
+        ]);
     }
 
     public static function ajax_get_logs()

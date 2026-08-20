@@ -34,6 +34,12 @@ class WPMB_Plugin
         add_action('admin_post_nopriv_wpmb_download', ['WPMB_Download_Handler', 'serve']);
         add_action('init', ['WPMB_Token', 'purge_expired']);
 
+        // See class-status-endpoint.php - the enable_maintenance_mode
+        // filter (regular plugin AND mu-plugin, both tried) never fires
+        // reliably in time on this host, so status is exposed via a
+        // standalone endpoint that doesn't depend on any WordPress hook.
+        WPMB_Status_Endpoint::ensure_installed();
+
         // CLI command registration lives in wp-migrate-lite.php at plugin
         // top-level scope (see comment there) - plugins_loaded fires too late
         // for WP-CLI to see the command.
@@ -57,6 +63,9 @@ class WPMB_Plugin
         } catch (Exception $e) {
             wp_die(esc_html__('WP Migrate Lite cannot initialise storage. Verify write permissions on wp-content.', 'wpmb'));
         }
+
+        WPMB_Status_Endpoint::ensure_installed();
+
         if (!wp_next_scheduled('wpmb_daily_housekeeping')) {
             wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'wpmb_daily_housekeeping');
         }

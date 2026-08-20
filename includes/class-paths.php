@@ -17,6 +17,55 @@ class WPMB_Paths
                 throw new RuntimeException(sprintf('WP Migrate Blueprint cannot create %s. Check filesystem permissions.', $path));
             }
         }
+
+        self::ensure_directory_protected();
+    }
+
+    /**
+     * base_dir() lives under wp-content, which web servers serve as static
+     * files by default - without this, full site backups (database + files)
+     * are downloadable by anyone who knows or guesses the filename, no
+     * authentication required. Filenames are predictable
+     * (YYYYMMDD-HHMMSS-host-env-label.zip), so this isn't theoretical.
+     * Self-healing like the other auto-installed files: rewritten whenever
+     * it's missing or stale, e.g. after a restore rolls wp-content back to
+     * an older snapshot that predates this fix.
+     *
+     * poll.php is deliberately exempted - it's the token-gated status
+     * endpoint that must stay reachable over plain HTTP even while this
+     * exact directory holds files that should otherwise never be served.
+     */
+    private static function ensure_directory_protected()
+    {
+        $target = trailingslashit(self::base_dir()) . '.htaccess';
+        $contents = <<<'HTACCESS'
+# Auto-installed by WP Migrate Lite. This directory holds full site backups
+# (database + files) and operation logs - nothing here should ever be served
+# directly over HTTP. Downloads go through the plugin's token-gated handler
+# instead. poll.php is the one intentional exception: a status endpoint with
+# its own token check, needed so progress can be checked even while
+# WordPress's native maintenance mode is blocking normal requests.
+<IfModule mod_authz_core.c>
+    Require all denied
+    <Files "poll.php">
+        Require all granted
+    </Files>
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+    <Files "poll.php">
+        Order deny,allow
+        Allow from all
+    </Files>
+</IfModule>
+HTACCESS;
+
+        if (file_exists($target) && file_get_contents($target) === $contents) {
+            return;
+        }
+
+        @file_put_contents($target, $contents);
     }
 
     public static function base_dir()
